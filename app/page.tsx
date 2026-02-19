@@ -64,6 +64,15 @@ interface CalibrationRecord {
   total_steps: number;
 }
 
+interface CoreAssistantResponse {
+  reply?: string;
+  provider?: string;
+  model?: string;
+  response_style?: string;
+  response_length?: string;
+  error?: string;
+}
+
 const CALIBRATION_STORAGE_KEY = "triaia_calibration_records_v1";
 
 const INFO_DETAILS = {
@@ -333,39 +342,58 @@ function shouldEnterCompletion(plan: PlanState): boolean {
   return deadlinePassed || allDone;
 }
 
-function assistantResponse(input: string, plan: PlanState, risk: RiskResult | null): string {
-  const text = input.toLowerCase();
+function buildAssistantMessage(userPrompt: string, plan: PlanState, risk: RiskResult | null): string {
+  const stepSummary = plan.steps
+    .slice(0, 10)
+    .map((step, index) => {
+      const status = step.completed ? "done" : "pending";
+      return `${index + 1}:${step.name}|${step.estimatedMinutes}m|${step.uncertainty}|${status}`;
+    })
+    .join("; ");
 
-  if (text.includes("break") || text.includes("steps") || text.includes("decompose")) {
-    return [
-      "Use 3-6 sequential steps with clear boundaries:",
-      "1. Preparation",
-      "2. Transit / execution",
-      "3. Final delivery checkpoint",
-      "Name each step with an observable completion condition."
-    ].join("\n");
+  const riskSummary = risk
+    ? `probability=${risk.probability.toFixed(3)}, drift_delta=${
+        risk.driftDelta === null ? "n/a" : risk.driftDelta.toFixed(3)
+      }, remaining_budget_minutes=${risk.remainingBudgetMinutes.toFixed(1)}`
+    : "probability=n/a, drift_delta=n/a, remaining_budget_minutes=n/a";
+
+  return [
+    `User request: ${userPrompt}`,
+    "Plan context:",
+    `goal_name=${plan.goalName || "(unset)"}`,
+    `deadline_local=${plan.deadlineLocal}`,
+    `created_at=${plan.createdAtIso}`,
+    `steps=${stepSummary || "none"}`,
+    riskSummary,
+    "Respond with concise tactical guidance only."
+  ].join("\n");
+}
+
+async function requestAssistantFromCore(messageText: string): Promise<CoreAssistantResponse> {
+  const response = await fetch("/api/core/assistant_chat", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      message: messageText,
+      response_style: "tactical",
+      response_length: "short"
+    }),
+    cache: "no-store"
+  });
+
+  let payload: CoreAssistantResponse = {};
+  try {
+    payload = (await response.json()) as CoreAssistantResponse;
+  } catch {
+    payload = {};
   }
 
-  if (text.includes("uncertainty")) {
-    return "Uncertainty levels map to duration spread: Low = tight range, Medium = moderate variation, High = wide variation. Use High when external queues, approvals, or traffic can swing timing.";
+  if (!response.ok) {
+    throw new Error(payload.error || `Assistant request failed (${response.status}).`);
   }
-
-  if (text.includes("risk") || text.includes("probability") || text.includes("p(")) {
-    if (!risk) {
-      return "Run Evaluate Plan first. Then I can explain what the probability and drift imply for this trajectory.";
-    }
-    return `Current estimated probability is ${(risk.probability * 100).toFixed(1)}%. Risk band is ${riskBand(risk.probability)}. ${driftLabel(risk)}`;
-  }
-
-  if (text.includes("duration") || text.includes("time")) {
-    return "Duration estimates should be realistic best-effort means. If uncertain, start with your median expectation and set uncertainty to Medium/High instead of forcing a single exact number.";
-  }
-
-  if (text.includes("what") && text.includes("track")) {
-    return "Triaia tracks trajectory probability over time, step-level uncertainty, remaining budget to deadline, and drift between expected and observed progress updates.";
-  }
-
-  return `Goal: "${plan.goalName || "(not set)"}". I can help with step design, uncertainty choices, and risk interpretation. I cannot submit forms or change probabilities directly.`;
+  return payload;
 }
 
 export default function HomePage() {
@@ -386,6 +414,8 @@ export default function HomePage() {
   const [chatOpen, setChatOpen] = useState(true);
   const [chatInput, setChatInput] = useState("");
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([message("assistant", ASSISTANT_INTRO)]);
+  const [isAskingAssistant, setIsAskingAssistant] = useState(false);
+  const [assistantMeta, setAssistantMeta] = useState("");
 
   const [draggingStepId, setDraggingStepId] = useState<string | null>(null);
 
@@ -427,6 +457,8 @@ export default function HomePage() {
     setShowDetails(false);
     setChatMessages([message("assistant", ASSISTANT_INTRO)]);
     setChatInput("");
+    setIsAskingAssistant(false);
+    setAssistantMeta("");
   }
 
   function startNewPlanFlow() {
@@ -573,7 +605,7 @@ export default function HomePage() {
     evaluatePlan(updatedPlan, "risk");
   }
 
-  function handleAssistantAsk(event: FormEvent) {
+  async function handleAssistantAsk(event: FormEvent) {
     event.preventDefault();
     const prompt = chatInput.trim();
     if (!prompt) {
@@ -581,13 +613,30 @@ export default function HomePage() {
     }
 
     setChatInput("");
-    const reply = assistantResponse(prompt, plan, risk);
+    setChatMessages((previous) => [...previous, message("user", prompt)]);
+    setIsAskingAssistant(true);
 
-    setChatMessages((previous) => [
-      ...previous,
-      message("user", prompt),
-      message("assistant", reply)
-    ]);
+    try {
+      const coreMessage = buildAssistantMessage(prompt, plan, risk);
+      const response = await requestAssistantFromCore(coreMessage);
+      const reply = (response.reply || "").trim();
+      if (!reply) {
+        throw new Error("Assistant returned empty response.");
+      }
+      setAssistantMeta(
+        `${response.provider || "core"} · ${response.model || "unknown"} · tactical · short`
+      );
+      setChatMessages((previous) => [...previous, message("assistant", reply)]);
+    } catch (caught) {
+      const detail = caught instanceof Error ? caught.message : "Unknown assistant error.";
+      setChatMessages((previous) => [
+        ...previous,
+        message("assistant", `Core assistant unavailable: ${detail}`)
+      ]);
+      setAssistantMeta("core assistant error");
+    } finally {
+      setIsAskingAssistant(false);
+    }
   }
 
   function submitCompletionOutcome() {
@@ -1038,12 +1087,15 @@ export default function HomePage() {
                   onChange={(event) => setChatInput(event.target.value)}
                   placeholder="Ask for step structure, uncertainty guidance, or risk interpretation"
                 />
-                <button type="submit" className="primaryButton">
-                  Ask Assistant
+                <button type="submit" className="primaryButton" disabled={isAskingAssistant || !chatInput.trim()}>
+                  {isAskingAssistant ? "Asking Core..." : "Ask Assistant"}
                 </button>
               </form>
 
-              <p className="metaText">Assistant cannot submit forms, override structure, or alter probabilities.</p>
+              <p className="metaText">
+                Assistant cannot submit forms, override structure, or alter probabilities.
+                {assistantMeta ? ` ${assistantMeta}` : ""}
+              </p>
             </>
           ) : null}
         </section>
