@@ -365,7 +365,8 @@ function buildAssistantMessage(userPrompt: string, plan: PlanState, risk: RiskRe
     `created_at=${plan.createdAtIso}`,
     `steps=${stepSummary || "none"}`,
     riskSummary,
-    "Respond with concise tactical guidance only."
+    "Respond with one neutral clarification question or one optional non-directive suggestion.",
+    "Do not use urgency language and do not issue commands."
   ].join("\n");
 }
 
@@ -377,7 +378,7 @@ async function requestAssistantFromCore(messageText: string): Promise<CoreAssist
     },
     body: JSON.stringify({
       message: messageText,
-      response_style: "tactical",
+      response_style: "detailed",
       response_length: "short"
     }),
     cache: "no-store"
@@ -624,7 +625,7 @@ export default function HomePage() {
         throw new Error("Assistant returned empty response.");
       }
       setAssistantMeta(
-        `${response.provider || "core"} · ${response.model || "unknown"} · tactical · short`
+        `${response.provider || "core"} · ${response.model || "unknown"} · detailed · short`
       );
       setChatMessages((previous) => [...previous, message("assistant", reply)]);
     } catch (caught) {
