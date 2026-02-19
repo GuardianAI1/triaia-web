@@ -152,6 +152,190 @@ a {
   font-size: 0.9rem;
 }
 
+.signatureCard {
+  display: grid;
+  gap: 10px;
+}
+
+.signatureGrid {
+  display: grid;
+  grid-template-columns: 1fr 1.1fr 1fr;
+  gap: 10px;
+}
+
+.signatureBlock {
+  border: 1px solid #d6e4f1;
+  border-radius: 12px;
+  background: #fbfdff;
+  padding: 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.signatureBlock h3 {
+  margin: 0;
+  font-size: 0.98rem;
+  font-family: var(--font-heading), "Space Grotesk", sans-serif;
+  letter-spacing: -0.01em;
+}
+
+.signatureList {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+}
+
+.signatureList div {
+  border: 1px solid #dfebf6;
+  border-radius: 9px;
+  background: #fff;
+  padding: 8px;
+}
+
+.signatureList dt {
+  color: #5a7387;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.signatureList dd {
+  margin: 4px 0 0;
+  font-weight: 600;
+  word-break: break-word;
+}
+
+.hierarchyRoot {
+  font-weight: 600;
+  color: #1f3f58;
+}
+
+.hierarchyList {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.hierarchyList li {
+  display: flex;
+  gap: 7px;
+  align-items: flex-start;
+  border: 1px solid #dfebf6;
+  border-radius: 9px;
+  background: #fff;
+  padding: 7px 8px;
+}
+
+.hierarchyState {
+  font-weight: 700;
+  width: 14px;
+  flex: 0 0 auto;
+}
+
+.hierarchyState.done {
+  color: #1b8454;
+}
+
+.hierarchyState.pending {
+  color: #60788a;
+}
+
+.hierarchyLabel {
+  color: #244459;
+  word-break: break-word;
+}
+
+.probabilitySummary {
+  color: #4f687b;
+  font-size: 0.89rem;
+}
+
+.trajectoryConfidenceRow {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.9rem;
+}
+
+.trajectoryConfidenceRow strong {
+  font-size: 0.95rem;
+}
+
+.confidenceMeter {
+  border: 1px solid #dce9f5;
+  background: #fff;
+  border-radius: 999px;
+  height: 10px;
+  overflow: hidden;
+}
+
+.confidenceFill {
+  height: 100%;
+  width: 0;
+  transition: width 220ms ease;
+}
+
+.confidenceFill.green {
+  background: #2f9e64;
+}
+
+.confidenceFill.orange {
+  background: #c9862c;
+}
+
+.confidenceFill.red {
+  background: #c04b3d;
+}
+
+.trendLine {
+  font-size: 0.88rem;
+  font-weight: 600;
+}
+
+.trendLine.improving {
+  color: #1f8a58;
+}
+
+.trendLine.declining {
+  color: #a1452d;
+}
+
+.trendLine.stable {
+  color: #587084;
+}
+
+.sparklineWrap {
+  min-height: 74px;
+  border: 1px solid #dfebf6;
+  border-radius: 10px;
+  background: #fff;
+  display: grid;
+  align-items: center;
+  padding: 6px;
+}
+
+.sparkline {
+  width: 100%;
+  height: 72px;
+  display: block;
+}
+
+.sparkline polyline {
+  fill: none;
+  stroke: #0f8ec9;
+  stroke-width: 2.25;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.sparklinePlaceholder {
+  color: #5d7588;
+  font-size: 0.88rem;
+}
+
 .middleGrid {
   display: grid;
   grid-template-columns: 1.45fr 1fr;
@@ -519,6 +703,10 @@ button:disabled {
 }
 
 @media (max-width: 920px) {
+  .signatureGrid {
+    grid-template-columns: 1fr;
+  }
+
   .middleGrid {
     grid-template-columns: 1fr;
   }

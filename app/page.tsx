@@ -122,6 +122,13 @@ function parseDeadline(deadlineLocal: string): Date | null {
   return parsed;
 }
 
+function formatRemainingTime(minutes: number): string {
+  const safeMinutes = Math.max(0, Math.floor(minutes));
+  const hours = Math.floor(safeMinutes / 60);
+  const mins = safeMinutes % 60;
+  return `${hours}h ${mins}m`;
+}
+
 function createStep(index: number): PlanStep {
   return {
     id: uid(),
@@ -428,6 +435,60 @@ export default function HomePage() {
   const shouldShowCompletion = deadlinePassed || allStepsDone;
 
   const currentBand = risk ? riskBand(risk.probability) : "orange";
+  const nextPendingStep = useMemo(
+    () => plan.steps.find((step) => !step.completed) ?? null,
+    [plan.steps]
+  );
+  const trajectoryPhase = useMemo(() => {
+    if (allStepsDone) {
+      return "completed";
+    }
+    if (deadlinePassed) {
+      return "deadline passed";
+    }
+    if (completedCount > 0) {
+      return "in progress";
+    }
+    return "planned";
+  }, [allStepsDone, completedCount, deadlinePassed]);
+  const probabilitySeries = useMemo(() => {
+    const values = riskHistory.map((point) => point.probability);
+    if (risk && (values.length === 0 || Math.abs(values[values.length - 1] - risk.probability) > 1e-6)) {
+      values.push(risk.probability);
+    }
+    return values.slice(-18);
+  }, [risk, riskHistory]);
+  const probabilitySparklinePoints = useMemo(() => {
+    if (probabilitySeries.length === 0) {
+      return "";
+    }
+    const width = 260;
+    const height = 72;
+    const padding = 6;
+    return probabilitySeries
+      .map((value, index) => {
+        const x =
+          probabilitySeries.length === 1
+            ? width / 2
+            : padding + (index * (width - padding * 2)) / (probabilitySeries.length - 1);
+        const y = padding + (1 - value) * (height - padding * 2);
+        return `${x.toFixed(1)},${y.toFixed(1)}`;
+      })
+      .join(" ");
+  }, [probabilitySeries]);
+  const trajectoryTrend = useMemo(() => {
+    if (!risk || risk.driftDelta === null) {
+      return { symbol: "→", label: "stable" };
+    }
+    if (risk.driftDelta > 0.001) {
+      return { symbol: "↑", label: "improving" };
+    }
+    if (risk.driftDelta < -0.001) {
+      return { symbol: "↓", label: "declining" };
+    }
+    return { symbol: "→", label: "stable" };
+  }, [risk]);
+  const trajectoryConfidencePercent = risk ? Math.max(0, Math.min(100, risk.probability * 100)) : 0;
 
   function resetAll() {
     setPlan(createEmptyPlan());
@@ -677,8 +738,8 @@ export default function HomePage() {
         <section className="card zoneCard">
           <header className="sectionHeader">
             <div>
-              <h2>Goal + Deadline</h2>
-              <p>Define your contract first. This is your static plan anchor.</p>
+              <h2>Goal (Contract) + Deadline</h2>
+              <p>Define objective and deadline as the contract anchor.</p>
             </div>
           </header>
 
@@ -704,10 +765,92 @@ export default function HomePage() {
             </label>
 
             <div className="inlineMetaRow">
-              <span>Time remaining: {timeRemainingMinutes.toFixed(1)} min</span>
+              <span>Time Remaining: {formatRemainingTime(timeRemainingMinutes)}</span>
               <span>Created: {new Date(plan.createdAtIso).toLocaleString()}</span>
             </div>
           </form>
+        </section>
+
+        <section className="card signatureCard">
+          <header className="sectionHeader">
+            <div>
+              <h2>Trajectory / Hierarchy / Probability</h2>
+              <p>Always-visible system state.</p>
+            </div>
+          </header>
+
+          <div className="signatureGrid">
+            <article className="signatureBlock">
+              <h3>Trajectory</h3>
+              <dl className="signatureList">
+                <div>
+                  <dt>Phase</dt>
+                  <dd>{trajectoryPhase}</dd>
+                </div>
+                <div>
+                  <dt>Progress</dt>
+                  <dd>
+                    {completedCount}/{plan.steps.length} ({progressPercent}%)
+                  </dd>
+                </div>
+                <div>
+                  <dt>Time Remaining</dt>
+                  <dd>{formatRemainingTime(timeRemainingMinutes)}</dd>
+                </div>
+                <div>
+                  <dt>Remaining Step</dt>
+                  <dd>{nextPendingStep ? nextPendingStep.name : "None (complete)"}</dd>
+                </div>
+              </dl>
+            </article>
+
+            <article className="signatureBlock">
+              <h3>Hierarchy</h3>
+              <div className="hierarchyRoot">Goal: {plan.goalName || "(unset)"}</div>
+              <ul className="hierarchyList">
+                {plan.steps.map((step, index) => (
+                  <li key={step.id}>
+                    <span className={`hierarchyState ${step.completed ? "done" : "pending"}`}>
+                      {step.completed ? "✓" : "○"}
+                    </span>
+                    <span className="hierarchyLabel">
+                      {index + 1}. {step.name || `Step ${index + 1}`}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </article>
+
+            <article className="signatureBlock">
+              <h3>Probability Over Time</h3>
+              <div className="probabilitySummary">
+                Current: {risk ? `${(risk.probability * 100).toFixed(1)}%` : "n/a"} · Samples:{" "}
+                {probabilitySeries.length}
+              </div>
+              <div className="trajectoryConfidenceRow">
+                <span>Trajectory Confidence</span>
+                <strong>{risk ? `${trajectoryConfidencePercent.toFixed(1)}%` : "n/a"}</strong>
+              </div>
+              <div className="confidenceMeter">
+                <div
+                  className={`confidenceFill ${currentBand}`}
+                  style={{ width: `${trajectoryConfidencePercent.toFixed(1)}%` }}
+                />
+              </div>
+              <div className={`trendLine ${trajectoryTrend.label}`}>
+                Trend {trajectoryTrend.symbol} {trajectoryTrend.label}
+              </div>
+              <div className="sparklineWrap">
+                {probabilitySparklinePoints ? (
+                  <svg viewBox="0 0 260 72" className="sparkline" role="img" aria-label="Probability history">
+                    <polyline points={probabilitySparklinePoints} />
+                  </svg>
+                ) : (
+                  <div className="sparklinePlaceholder">Evaluate plan to start probability timeline.</div>
+                )}
+              </div>
+            </article>
+          </div>
         </section>
 
         <section className="middleGrid">
@@ -869,7 +1012,7 @@ export default function HomePage() {
               </div>
               <div>
                 <dt>Time Remaining</dt>
-                <dd>{timeRemainingMinutes.toFixed(1)} min</dd>
+                <dd>{formatRemainingTime(timeRemainingMinutes)}</dd>
               </div>
               <div>
                 <dt>Drift</dt>
