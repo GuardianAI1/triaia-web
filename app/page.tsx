@@ -1,12 +1,10 @@
 "use client";
 
 import Image from "next/image";
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
-type Screen = "landing" | "setup" | "risk" | "progress" | "completion";
 type UncertaintyLevel = "low" | "medium" | "high";
 type OutcomeAnswer = "yes" | "no" | null;
-
 type ChatRole = "user" | "assistant";
 
 interface ChatMessage {
@@ -75,22 +73,18 @@ interface CoreAssistantResponse {
 
 const CALIBRATION_STORAGE_KEY = "triaia_calibration_records_v1";
 
+const ASSISTANT_INTRO =
+  "I support structure and interpretation only. I can suggest steps, uncertainty labels, and explain risk numbers. I cannot update plan state.";
+
 const INFO_DETAILS = {
   title: "Triaia — Trajectory Risk Estimator",
   subtitle: "Estimate probability of completing a time-constrained goal.",
   description:
-    "Triaia models a goal as a sequential trajectory with uncertainty. It estimates whether the full sequence can be completed before the deadline and recalculates risk as progress updates arrive.",
-  whatItTracks: [
-    "Trajectory modeling over time",
-    "Constraint-aware decision layers",
-    "Hierarchical decomposition via ordered steps",
-    "Revision under external feedback",
-    "Drift monitoring between expected and observed progress"
-  ],
-  boundaries: [
-    "Assistant is guidance-only: it helps define steps and explain risk.",
-    "Assistant cannot submit forms, override probabilities, or inject hidden parameters.",
-    "Manual progress updates are the source of ground-truth state in this Phase A UI."
+    "Triaia is state-driven. Plan structure and progress are explicit in the UI. Chat is explanation-only and does not update state.",
+  rules: [
+    "State updates happen only through step checkboxes.",
+    "Chat can suggest structure, but cannot mark steps done.",
+    "Probability is recalculated from explicit state transitions."
   ]
 };
 
@@ -99,9 +93,6 @@ const UNCERTAINTY_OPTIONS: Array<{ value: UncertaintyLevel; label: string }> = [
   { value: "medium", label: "Medium" },
   { value: "high", label: "High" }
 ];
-
-const ASSISTANT_INTRO =
-  "I can help break goals into steps, explain uncertainty, and interpret the current risk estimate. I cannot modify your plan directly or submit forms.";
 
 function uid(): string {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
@@ -114,13 +105,21 @@ function message(role: ChatRole, text: string): ChatMessage {
   return { id: uid(), role, text };
 }
 
+function nowIso(): string {
+  return new Date().toISOString();
+}
+
 function formatDateTimeLocal(date: Date): string {
   const adjusted = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
   return adjusted.toISOString().slice(0, 16);
 }
 
-function nowIso(): string {
-  return new Date().toISOString();
+function parseDeadline(deadlineLocal: string): Date | null {
+  const parsed = new Date(deadlineLocal);
+  if (Number.isNaN(parsed.getTime())) {
+    return null;
+  }
+  return parsed;
 }
 
 function createStep(index: number): PlanStep {
@@ -160,14 +159,6 @@ function clonePlan(plan: PlanState): PlanState {
       expanded: true
     }))
   };
-}
-
-function parseDeadline(deadlineLocal: string): Date | null {
-  const parsed = new Date(deadlineLocal);
-  if (Number.isNaN(parsed.getTime())) {
-    return null;
-  }
-  return parsed;
 }
 
 function validatePlan(plan: PlanState): string | null {
@@ -335,13 +326,6 @@ function driftLabel(result: RiskResult | null): string {
   return "Drift unchanged.";
 }
 
-function shouldEnterCompletion(plan: PlanState): boolean {
-  const deadline = parseDeadline(plan.deadlineLocal);
-  const deadlinePassed = deadline !== null && deadline.getTime() <= Date.now();
-  const allDone = plan.steps.length > 0 && plan.steps.every((step) => step.completed);
-  return deadlinePassed || allDone;
-}
-
 function buildAssistantMessage(userPrompt: string, plan: PlanState, risk: RiskResult | null): string {
   const stepSummary = plan.steps
     .slice(0, 10)
@@ -362,7 +346,6 @@ function buildAssistantMessage(userPrompt: string, plan: PlanState, risk: RiskRe
     "Plan context:",
     `goal_name=${plan.goalName || "(unset)"}`,
     `deadline_local=${plan.deadlineLocal}`,
-    `created_at=${plan.createdAtIso}`,
     `steps=${stepSummary || "none"}`,
     riskSummary,
     "Respond with one neutral clarification question or one optional non-directive suggestion.",
@@ -398,7 +381,6 @@ async function requestAssistantFromCore(messageText: string): Promise<CoreAssist
 }
 
 export default function HomePage() {
-  const [screen, setScreen] = useState<Screen>("landing");
   const [plan, setPlan] = useState<PlanState>(createEmptyPlan);
   const [risk, setRisk] = useState<RiskResult | null>(null);
   const [riskHistory, setRiskHistory] = useState<RiskPoint[]>([]);
@@ -412,15 +394,25 @@ export default function HomePage() {
   const [showInfo, setShowInfo] = useState(false);
   const [showDetails, setShowDetails] = useState(false);
 
-  const [chatOpen, setChatOpen] = useState(true);
+  const [chatOpen, setChatOpen] = useState(false);
   const [chatInput, setChatInput] = useState("");
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([message("assistant", ASSISTANT_INTRO)]);
   const [isAskingAssistant, setIsAskingAssistant] = useState(false);
   const [assistantMeta, setAssistantMeta] = useState("");
 
   const [draggingStepId, setDraggingStepId] = useState<string | null>(null);
+  const [focusProgress, setFocusProgress] = useState(false);
+  const [nowMs, setNowMs] = useState<number>(() => Date.now());
+
+  const progressSectionRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNowMs(Date.now()), 30000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   const completedCount = useMemo(() => plan.steps.filter((step) => step.completed).length, [plan.steps]);
+  const pendingCount = useMemo(() => Math.max(0, plan.steps.length - completedCount), [completedCount, plan.steps.length]);
   const progressPercent = useMemo(() => {
     if (plan.steps.length === 0) {
       return 0;
@@ -428,25 +420,16 @@ export default function HomePage() {
     return Math.round((completedCount / plan.steps.length) * 100);
   }, [completedCount, plan.steps.length]);
 
+  const deadline = useMemo(() => parseDeadline(plan.deadlineLocal), [plan.deadlineLocal]);
+  const deadlineMs = deadline?.getTime() ?? nowMs;
+  const timeRemainingMinutes = useMemo(() => Math.max(0, (deadlineMs - nowMs) / 60000), [deadlineMs, nowMs]);
+  const deadlinePassed = deadline !== null && deadlineMs <= nowMs;
+  const allStepsDone = plan.steps.length > 0 && plan.steps.every((step) => step.completed);
+  const shouldShowCompletion = deadlinePassed || allStepsDone;
+
   const currentBand = risk ? riskBand(risk.probability) : "orange";
 
-  useEffect(() => {
-    if (screen !== "risk" && screen !== "progress") {
-      return;
-    }
-
-    const timer = window.setInterval(() => {
-      if (shouldEnterCompletion(plan)) {
-        setScreen("completion");
-      }
-    }, 30000);
-
-    return () => {
-      window.clearInterval(timer);
-    };
-  }, [plan, screen]);
-
-  function resetForNewPlan() {
+  function resetAll() {
     setPlan(createEmptyPlan());
     setRisk(null);
     setRiskHistory([]);
@@ -460,16 +443,7 @@ export default function HomePage() {
     setChatInput("");
     setIsAskingAssistant(false);
     setAssistantMeta("");
-  }
-
-  function startNewPlanFlow() {
-    resetForNewPlan();
-    setScreen("setup");
-  }
-
-  function handleCancelSetup() {
-    resetForNewPlan();
-    setScreen("landing");
+    setFocusProgress(false);
   }
 
   function replaceStep(stepId: string, patch: Partial<PlanStep>) {
@@ -486,43 +460,30 @@ export default function HomePage() {
     }));
   }
 
+  function removeStep(stepId: string) {
+    setPlan((previous) => ({
+      ...previous,
+      steps: previous.steps.filter((step) => step.id !== stepId)
+    }));
+  }
+
   function clearAllSteps() {
     setPlan((previous) => ({
       ...previous,
       steps: []
     }));
+    setFocusProgress(false);
   }
 
-  function duplicateCurrentPlan() {
+  function duplicatePlan() {
     const copy = clonePlan(plan);
     setPlan(copy);
     setRisk(null);
     setRiskHistory([]);
     setInitialProbability(null);
     setPlanError("");
-    setScreen("setup");
-  }
-
-  function resetProgress() {
-    const updated: PlanState = {
-      ...plan,
-      steps: plan.steps.map((step) => ({
-        ...step,
-        completed: false,
-        completedAt: null
-      }))
-    };
-    setPlan(updated);
-    if (risk) {
-      evaluatePlan(updated, "risk");
-    }
-  }
-
-  function removeStep(stepId: string) {
-    setPlan((previous) => ({
-      ...previous,
-      steps: previous.steps.filter((step) => step.id !== stepId)
-    }));
+    setCompletionAnswer(null);
+    setCompletionFeedback("");
   }
 
   function reorderSteps(fromIndex: number, toIndex: number) {
@@ -550,11 +511,10 @@ export default function HomePage() {
     reorderSteps(index, target);
   }
 
-  function evaluatePlan(nextPlan: PlanState, targetScreen: Screen = "risk"): boolean {
+  function evaluatePlan(nextPlan: PlanState = plan): boolean {
     const validationError = validatePlan(nextPlan);
     if (validationError) {
       setPlanError(validationError);
-      setScreen("setup");
       return false;
     }
 
@@ -568,24 +528,22 @@ export default function HomePage() {
     setRisk(result);
     setRiskHistory((previous) => [...previous.slice(-18), nextPoint]);
     setPlanError("");
-    setCompletionFeedback("");
 
     if (initialProbability === null) {
       setInitialProbability(result.probability);
     }
 
-    if (shouldEnterCompletion(nextPlan)) {
-      setScreen("completion");
-      return true;
-    }
-
-    setScreen(targetScreen);
     return true;
   }
 
   function handleEvaluatePlanSubmit(event: FormEvent) {
     event.preventDefault();
-    evaluatePlan(plan, "risk");
+    evaluatePlan(plan);
+  }
+
+  function focusProgressPanel() {
+    setFocusProgress(true);
+    progressSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
   }
 
   function toggleStepCompletion(stepId: string, completed: boolean) {
@@ -603,7 +561,21 @@ export default function HomePage() {
       )
     };
 
-    evaluatePlan(updatedPlan, "risk");
+    evaluatePlan(updatedPlan);
+  }
+
+  function resetProgress() {
+    const updatedPlan: PlanState = {
+      ...plan,
+      steps: plan.steps.map((step) => ({
+        ...step,
+        completed: false,
+        completedAt: null
+      }))
+    };
+    setCompletionAnswer(null);
+    setCompletionFeedback("");
+    evaluatePlan(updatedPlan);
   }
 
   async function handleAssistantAsk(event: FormEvent) {
@@ -683,45 +655,34 @@ export default function HomePage() {
     }
   }
 
-  function renderLanding() {
-    return (
-      <section className="card landingCard">
-        <Image src="/triaia-logo.png" alt="Triaia logo" width={152} height={152} priority />
-        <h1>Triaia — Trajectory Risk Estimator</h1>
-        <p>Estimate probability of completing a time-constrained goal.</p>
-        <div className="landingActions">
-          <button type="button" className="primaryButton" onClick={startNewPlanFlow}>
-            Create New Plan
-          </button>
-          <button type="button" className="ghostButton" onClick={() => setShowInfo(true)}>
-            What is this?
-          </button>
-        </div>
-      </section>
-    );
-  }
-
-  function renderSetup() {
-    return (
-      <section className="card">
-        <header className="sectionHeader">
+  return (
+    <main className="appShell">
+      <div className="backdropGrid" />
+      <div className="page">
+        <header className="topRow">
           <div>
-            <h2>Plan Setup</h2>
-            <p>Define the goal, deadline, then add sequential steps.</p>
+            <h1>Triaia</h1>
+            <p>State-driven trajectory evaluation</p>
           </div>
-          <div className="headerButtons">
-            <button type="button" className="ghostButton" onClick={duplicateCurrentPlan}>
-              Duplicate Plan
+          <div className="topButtons">
+            <button type="button" className="ghostButton" onClick={() => setShowInfo(true)}>
+              Info
             </button>
-            <button type="button" className="ghostButton" onClick={clearAllSteps}>
-              Clear All Steps
-            </button>
+            <a href="mailto:contact@triaia.com" className="contactButton">
+              contact@triaia.com
+            </a>
           </div>
         </header>
 
-        <form className="setupForm" onSubmit={handleEvaluatePlanSubmit}>
-          <div className="fieldGroup">
-            <h3>Goal Definition</h3>
+        <section className="card zoneCard">
+          <header className="sectionHeader">
+            <div>
+              <h2>Goal + Deadline</h2>
+              <p>Define your contract first. This is your static plan anchor.</p>
+            </div>
+          </header>
+
+          <form className="goalGrid" onSubmit={handleEvaluatePlanSubmit}>
             <label>
               Goal Name
               <input
@@ -741,21 +702,31 @@ export default function HomePage() {
                 required
               />
             </label>
-          </div>
 
-          <div className="fieldGroup">
-            <div className="stepHeaderRow">
-              <h3>Step Definition</h3>
+            <div className="inlineMetaRow">
+              <span>Time remaining: {timeRemainingMinutes.toFixed(1)} min</span>
+              <span>Created: {new Date(plan.createdAtIso).toLocaleString()}</span>
+            </div>
+          </form>
+        </section>
+
+        <section className="middleGrid">
+          <div ref={progressSectionRef} className={`card zoneCard ${focusProgress ? "focusedZone" : ""}`}>
+            <header className="sectionHeader">
+              <div>
+                <h2>Plan Structure + Current Progress</h2>
+                <p>State updates are explicit: only these checkboxes change progress.</p>
+              </div>
               <button type="button" className="primaryButton compact" onClick={addStep}>
                 + Add Step
               </button>
-            </div>
+            </header>
 
-            <div className="stepsList">
+            <div className="stepList">
               {plan.steps.map((step, index) => (
                 <article
                   key={step.id}
-                  className="stepCard"
+                  className={`stepCard ${step.completed ? "completed" : ""}`}
                   draggable
                   onDragStart={() => setDraggingStepId(step.id)}
                   onDragOver={(event) => event.preventDefault()}
@@ -770,11 +741,26 @@ export default function HomePage() {
                   }}
                   onDragEnd={() => setDraggingStepId(null)}
                 >
-                  <header>
-                    <strong>
-                      Step {index + 1} {step.completed ? "• Completed" : ""}
-                    </strong>
-                    <div className="stepButtons">
+                  <div className="stepHeaderRow">
+                    <label className="checkLabel">
+                      <input
+                        type="checkbox"
+                        checked={step.completed}
+                        onChange={(event) => toggleStepCompletion(step.id, event.target.checked)}
+                      />
+                      <span className="stepMainText">
+                        <strong>
+                          Step {index + 1} {step.name ? `- ${step.name}` : ""}
+                        </strong>
+                        <small>
+                          {step.completedAt
+                            ? `Recorded at ${new Date(step.completedAt).toLocaleTimeString()}`
+                            : "Pending"}
+                        </small>
+                      </span>
+                    </label>
+
+                    <div className="stepActions">
                       <button type="button" className="tinyButton" onClick={() => moveStep(step.id, "up")}>↑</button>
                       <button type="button" className="tinyButton" onClick={() => moveStep(step.id, "down")}>↓</button>
                       <button
@@ -788,10 +774,10 @@ export default function HomePage() {
                         Remove
                       </button>
                     </div>
-                  </header>
+                  </div>
 
                   {step.expanded ? (
-                    <div className="stepBody">
+                    <div className="stepDetailGrid">
                       <label>
                         Step Name
                         <input
@@ -814,7 +800,7 @@ export default function HomePage() {
                       </label>
 
                       <label>
-                        Uncertainty Level
+                        Uncertainty
                         <select
                           value={step.uncertainty}
                           onChange={(event) => replaceStep(step.id, { uncertainty: event.target.value as UncertaintyLevel })}
@@ -828,7 +814,7 @@ export default function HomePage() {
                       </label>
 
                       <label>
-                        Importance Weight ({step.importance})
+                        Importance ({step.importance})
                         <input
                           type="range"
                           min={1}
@@ -843,228 +829,169 @@ export default function HomePage() {
                 </article>
               ))}
             </div>
+
+            {plan.steps.length === 0 ? <p className="hintText">No steps yet. Add step to define trajectory.</p> : null}
+          </div>
+
+          <div className="card zoneCard">
+            <header className="sectionHeader">
+              <div>
+                <h2>Current State</h2>
+                <p>This is where you are now.</p>
+              </div>
+              <span className={`riskPill ${currentBand}`}>{currentBand.toUpperCase()}</span>
+            </header>
+
+            <div className={`probabilityBlock ${currentBand}`}>
+              <span>Current Probability</span>
+              <strong>{risk ? risk.probability.toFixed(2) : "--"}</strong>
+            </div>
+
+            {risk && risk.probability < 0.6 ? <p className="alertLine">Trajectory risk elevated.</p> : null}
+            {risk?.acceleratingNegativeDrift ? <p className="subtleAlert">Risk increasing.</p> : null}
+
+            <dl className="stateGrid">
+              <div>
+                <dt>Goal</dt>
+                <dd>{plan.goalName || "Unset"}</dd>
+              </div>
+              <div>
+                <dt>Deadline</dt>
+                <dd>{deadline ? deadline.toLocaleString() : "Invalid"}</dd>
+              </div>
+              <div>
+                <dt>Completed</dt>
+                <dd>{completedCount}</dd>
+              </div>
+              <div>
+                <dt>Pending</dt>
+                <dd>{pendingCount}</dd>
+              </div>
+              <div>
+                <dt>Time Remaining</dt>
+                <dd>{timeRemainingMinutes.toFixed(1)} min</dd>
+              </div>
+              <div>
+                <dt>Drift</dt>
+                <dd>{driftLabel(risk)}</dd>
+              </div>
+            </dl>
+
+            <button type="button" className="ghostButton" onClick={() => setShowDetails((value) => !value)}>
+              {showDetails ? "Hide Details" : "Show Details"}
+            </button>
+
+            {showDetails && risk ? (
+              <dl className="detailGrid">
+                <div>
+                  <dt>Estimated Completion Time</dt>
+                  <dd>{risk.estimatedCompletionMinutes.toFixed(1)} min</dd>
+                </div>
+                <div>
+                  <dt>Confidence Interval</dt>
+                  <dd>
+                    {risk.ciLowMinutes.toFixed(1)} - {risk.ciHighMinutes.toFixed(1)} min
+                  </dd>
+                </div>
+                <div>
+                  <dt>Simulations</dt>
+                  <dd>{risk.simulations}</dd>
+                </div>
+                <div>
+                  <dt>Evaluated At</dt>
+                  <dd>{new Date(risk.evaluatedAtIso).toLocaleTimeString()}</dd>
+                </div>
+              </dl>
+            ) : null}
+          </div>
+        </section>
+
+        <section className="card zoneCard">
+          <header className="sectionHeader">
+            <div>
+              <h2>Action Panel</h2>
+              <p>Explicit controls. No hidden state transitions through chat.</p>
+            </div>
+          </header>
+
+          <div className="buttonRow wrap">
+            <button type="button" className="primaryButton" onClick={() => evaluatePlan(plan)}>
+              Evaluate Plan
+            </button>
+            <button type="button" className="ghostButton" onClick={focusProgressPanel}>
+              Update Progress
+            </button>
+            <button type="button" className="ghostButton" onClick={() => evaluatePlan(plan)}>
+              Recalculate
+            </button>
+            <button type="button" className="ghostButton" onClick={duplicatePlan}>
+              Duplicate Plan
+            </button>
+            <button type="button" className="ghostButton" onClick={clearAllSteps}>
+              Clear All Steps
+            </button>
+            <button type="button" className="ghostButton" onClick={resetProgress}>
+              Reset Progress
+            </button>
+            <button type="button" className="ghostButton" onClick={resetAll}>
+              Start New Plan
+            </button>
           </div>
 
           {planError ? <p className="errorText">{planError}</p> : null}
+          <p className="metaText">Progress: {progressPercent}% complete.</p>
+        </section>
 
-          <div className="buttonRow">
-            <button type="submit" className="primaryButton">
-              Evaluate Plan
-            </button>
-            <button type="button" className="ghostButton" onClick={handleCancelSetup}>
-              Cancel
-            </button>
-          </div>
-        </form>
-      </section>
-    );
-  }
+        {shouldShowCompletion ? (
+          <section className="card zoneCard">
+            <header className="sectionHeader">
+              <div>
+                <h2>Completion</h2>
+                <p>Was the goal completed before deadline?</p>
+              </div>
+            </header>
 
-  function renderRisk() {
-    return (
-      <section className="card">
-        <header className="sectionHeader">
-          <div>
-            <h2>Risk Result</h2>
-            <p>{plan.goalName || "Unnamed goal"}</p>
-          </div>
-          <span className={`riskPill ${currentBand}`}>{currentBand.toUpperCase()}</span>
-        </header>
+            <div className="buttonRow">
+              <button
+                type="button"
+                className={completionAnswer === "yes" ? "primaryButton" : "ghostButton"}
+                onClick={() => setCompletionAnswer("yes")}
+              >
+                Yes
+              </button>
+              <button
+                type="button"
+                className={completionAnswer === "no" ? "primaryButton" : "ghostButton"}
+                onClick={() => setCompletionAnswer("no")}
+              >
+                No
+              </button>
+            </div>
 
-        <div className={`bigProbability ${currentBand}`}>
-          <span>P(Goal Achieved Before Deadline)</span>
-          <strong>{risk ? risk.probability.toFixed(2) : "0.00"}</strong>
-        </div>
+            <label>
+              Actual completion time (optional)
+              <input
+                type="datetime-local"
+                value={actualCompletionLocal}
+                onChange={(event) => setActualCompletionLocal(event.target.value)}
+              />
+            </label>
 
-        {risk && risk.probability < 0.6 ? <p className="alertLine">Trajectory risk elevated.</p> : null}
-        {risk?.acceleratingNegativeDrift ? <p className="subtleAlert">Risk increasing.</p> : null}
+            <div className="buttonRow">
+              <button type="button" className="primaryButton" onClick={submitCompletionOutcome}>
+                Submit Outcome
+              </button>
+            </div>
 
-        <button type="button" className="ghostButton" onClick={() => setShowDetails((value) => !value)}>
-          {showDetails ? "Hide Details" : "Show Details"}
-        </button>
-
-        {showDetails && risk ? (
-          <dl className="metricGrid">
-            <div>
-              <dt>Estimated Completion Time</dt>
-              <dd>{risk.estimatedCompletionMinutes.toFixed(1)} min</dd>
-            </div>
-            <div>
-              <dt>Confidence Interval</dt>
-              <dd>
-                {risk.ciLowMinutes.toFixed(1)} - {risk.ciHighMinutes.toFixed(1)} min
-              </dd>
-            </div>
-            <div>
-              <dt>Drift Indicator</dt>
-              <dd>{driftLabel(risk)}</dd>
-            </div>
-            <div>
-              <dt>Number of Simulations</dt>
-              <dd>{risk.simulations}</dd>
-            </div>
-            <div>
-              <dt>Remaining Deadline Budget</dt>
-              <dd>{risk.remainingBudgetMinutes.toFixed(1)} min</dd>
-            </div>
-            <div>
-              <dt>Progress</dt>
-              <dd>
-                {completedCount}/{plan.steps.length} steps ({progressPercent}%)
-              </dd>
-            </div>
-          </dl>
+            {completionFeedback ? <p className="metaText">{completionFeedback}</p> : null}
+          </section>
         ) : null}
 
-        <div className="buttonRow wrap">
-          <button type="button" className="primaryButton" onClick={() => setScreen("progress")}>
-            Update Progress
-          </button>
-          <button type="button" className="ghostButton" onClick={() => setScreen("setup")}>
-            Adjust Plan
-          </button>
-          <button type="button" className="ghostButton" onClick={() => evaluatePlan(plan, "risk")}>
-            Recalculate
-          </button>
-          <button type="button" className="ghostButton" onClick={resetProgress}>
-            Reset Progress
-          </button>
-          <button type="button" className="ghostButton" onClick={startNewPlanFlow}>
-            Start New Plan
-          </button>
-        </div>
-      </section>
-    );
-  }
-
-  function renderProgress() {
-    return (
-      <section className="card">
-        <header className="sectionHeader">
-          <div>
-            <h2>Update Progress</h2>
-            <p>Check completed steps. Timestamp is recorded automatically.</p>
-          </div>
-          <span className="progressBadge">{progressPercent}% complete</span>
-        </header>
-
-        <div className="checklist">
-          {plan.steps.map((step, index) => (
-            <label key={step.id} className="checkRow">
-              <input
-                type="checkbox"
-                checked={step.completed}
-                onChange={(event) => toggleStepCompletion(step.id, event.target.checked)}
-              />
-              <span>
-                Step {index + 1} — {step.name}
-                {step.completedAt ? <small>Completed at {new Date(step.completedAt).toLocaleString()}</small> : null}
-              </span>
-            </label>
-          ))}
-        </div>
-
-        <div className="buttonRow">
-          <button type="button" className="ghostButton" onClick={() => setScreen("risk")}>
-            Back to Risk
-          </button>
-        </div>
-      </section>
-    );
-  }
-
-  function renderCompletion() {
-    return (
-      <section className="card">
-        <header className="sectionHeader">
-          <div>
-            <h2>Completion</h2>
-            <p>Was the goal completed before deadline?</p>
-          </div>
-        </header>
-
-        <div className="buttonRow">
-          <button
-            type="button"
-            className={completionAnswer === "yes" ? "primaryButton" : "ghostButton"}
-            onClick={() => setCompletionAnswer("yes")}
-          >
-            Yes
-          </button>
-          <button
-            type="button"
-            className={completionAnswer === "no" ? "primaryButton" : "ghostButton"}
-            onClick={() => setCompletionAnswer("no")}
-          >
-            No
-          </button>
-        </div>
-
-        <label>
-          Actual completion time (optional)
-          <input
-            type="datetime-local"
-            value={actualCompletionLocal}
-            onChange={(event) => setActualCompletionLocal(event.target.value)}
-          />
-        </label>
-
-        <div className="buttonRow">
-          <button type="button" className="primaryButton" onClick={submitCompletionOutcome}>
-            Submit Outcome
-          </button>
-          <button type="button" className="ghostButton" onClick={startNewPlanFlow}>
-            Start New Plan
-          </button>
-        </div>
-
-        {completionFeedback ? <p className="metaText">{completionFeedback}</p> : null}
-      </section>
-    );
-  }
-
-  function renderScreen() {
-    if (screen === "landing") {
-      return renderLanding();
-    }
-    if (screen === "setup") {
-      return renderSetup();
-    }
-    if (screen === "risk") {
-      return renderRisk();
-    }
-    if (screen === "progress") {
-      return renderProgress();
-    }
-    return renderCompletion();
-  }
-
-  return (
-    <main className="appShell">
-      <div className="backdropGrid" />
-      <div className="page">
-        <header className="topRow">
-          <div>
-            <h1>Triaia</h1>
-            <p>General Planning UI - Phase A</p>
-          </div>
-          <div className="topButtons">
-            <button type="button" className="ghostButton" onClick={() => setShowInfo(true)}>
-              Info
-            </button>
-            <a href="mailto:contact@triaia.com" className="contactButton">
-              contact@triaia.com
-            </a>
-          </div>
-        </header>
-
-        {renderScreen()}
-
-        <section className="card chatCard">
+        <section className="card zoneCard chatZone">
           <header className="sectionHeader">
             <div>
-              <h2>Chatbot Panel</h2>
-              <p>Assistance-only: step suggestions, uncertainty guidance, risk explanations.</p>
+              <h2>Chat (Guidance Layer)</h2>
+              <p>Chat is secondary. It cannot update state.</p>
             </div>
             <button type="button" className="ghostButton" onClick={() => setChatOpen((value) => !value)}>
               {chatOpen ? "Collapse" : "Expand"}
@@ -1086,7 +1013,7 @@ export default function HomePage() {
                   rows={3}
                   value={chatInput}
                   onChange={(event) => setChatInput(event.target.value)}
-                  placeholder="Ask for step structure, uncertainty guidance, or risk interpretation"
+                  placeholder="Ask for structure, uncertainty, or probability interpretation"
                 />
                 <button type="submit" className="primaryButton" disabled={isAskingAssistant || !chatInput.trim()}>
                   {isAskingAssistant ? "Asking Core..." : "Ask Assistant"}
@@ -1094,7 +1021,7 @@ export default function HomePage() {
               </form>
 
               <p className="metaText">
-                Assistant cannot submit forms, override structure, or alter probabilities.
+                Assistant cannot submit forms, mark completion, or alter probabilities.
                 {assistantMeta ? ` ${assistantMeta}` : ""}
               </p>
             </>
@@ -1117,16 +1044,8 @@ export default function HomePage() {
 
             <p>{INFO_DETAILS.description}</p>
 
-            <h3>What it tracks</h3>
             <ul>
-              {INFO_DETAILS.whatItTracks.map((item) => (
-                <li key={item}>{item}</li>
-              ))}
-            </ul>
-
-            <h3>Boundaries</h3>
-            <ul>
-              {INFO_DETAILS.boundaries.map((item) => (
+              {INFO_DETAILS.rules.map((item) => (
                 <li key={item}>{item}</li>
               ))}
             </ul>
