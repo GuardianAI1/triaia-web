@@ -3,7 +3,9 @@ import { NextRequest, NextResponse } from "next/server";
 export const runtime = "nodejs";
 
 const CORE_OVERRIDE_HEADER = "x-triaia-core-url";
-const DEFAULT_CORE_URL = process.env.HTP_CORE_URL ?? "http://127.0.0.1:8081";
+const ENV_CORE_URL = process.env.HTP_CORE_URL ?? "";
+const LOCAL_CORE_URL = "http://127.0.0.1:8081";
+const CLOUD_CORE_URL = "https://core.triaia.com";
 
 function normalizeCoreBaseUrl(rawUrl: string): string {
   const candidate = rawUrl.trim();
@@ -35,10 +37,30 @@ function buildTargetUrl(request: NextRequest, pathSegments: string[], baseUrl: s
   return target;
 }
 
+function resolveCoreCandidates(overrideHeader: string | null): string[] {
+  if (overrideHeader?.trim()) {
+    return [normalizeCoreBaseUrl(overrideHeader)];
+  }
+
+  const candidates: string[] = [];
+  for (const rawUrl of [ENV_CORE_URL, LOCAL_CORE_URL, CLOUD_CORE_URL]) {
+    if (!rawUrl.trim()) {
+      continue;
+    }
+    const normalized = normalizeCoreBaseUrl(rawUrl);
+    if (!candidates.includes(normalized)) {
+      candidates.push(normalized);
+    }
+  }
+  return candidates;
+}
+
 async function proxyRequest(request: NextRequest, pathSegments: string[]): Promise<NextResponse> {
   try {
-    const coreBase = normalizeCoreBaseUrl(request.headers.get(CORE_OVERRIDE_HEADER) ?? DEFAULT_CORE_URL);
-    const target = buildTargetUrl(request, pathSegments, coreBase);
+    const coreBases = resolveCoreCandidates(request.headers.get(CORE_OVERRIDE_HEADER));
+    if (coreBases.length === 0) {
+      throw new Error("No core URL candidates are configured.");
+    }
 
     const headers = new Headers();
     const contentType = request.headers.get("content-type");
@@ -53,22 +75,40 @@ async function proxyRequest(request: NextRequest, pathSegments: string[]): Promi
     const hasBody = request.method !== "GET" && request.method !== "HEAD";
     const body = hasBody ? await request.text() : undefined;
 
-    const upstream = await fetch(target, {
-      method: request.method,
-      headers,
-      body,
-      cache: "no-store"
-    });
+    let lastError: unknown = null;
+    for (const coreBase of coreBases) {
+      try {
+        const target = buildTargetUrl(request, pathSegments, coreBase);
+        const upstream = await fetch(target, {
+          method: request.method,
+          headers,
+          body,
+          cache: "no-store",
+          signal: AbortSignal.timeout(6000)
+        });
 
-    const responseText = await upstream.text();
-    const responseHeaders = new Headers();
-    const upstreamContentType = upstream.headers.get("content-type") ?? "application/json";
-    responseHeaders.set("content-type", upstreamContentType);
+        const responseText = await upstream.text();
+        const responseHeaders = new Headers();
+        const upstreamContentType = upstream.headers.get("content-type") ?? "application/json";
+        responseHeaders.set("content-type", upstreamContentType);
+        responseHeaders.set("x-triaia-core-base", coreBase);
 
-    return new NextResponse(responseText, {
-      status: upstream.status,
-      headers: responseHeaders
-    });
+        return new NextResponse(responseText, {
+          status: upstream.status,
+          headers: responseHeaders
+        });
+      } catch (error) {
+        lastError = error;
+      }
+    }
+
+    const detail = lastError instanceof Error ? lastError.message : "Proxy request failed.";
+    return NextResponse.json(
+      {
+        error: `${detail}. Tried core endpoints: ${coreBases.join(", ")}`
+      },
+      { status: 502 }
+    );
   } catch (error) {
     const message = error instanceof Error ? error.message : "Proxy request failed.";
     return NextResponse.json({ error: message }, { status: 502 });
