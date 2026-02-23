@@ -463,6 +463,42 @@ button:disabled {
   padding: 2px 8px;
 }
 
+.invariantList {
+  display: grid;
+  gap: 8px;
+}
+
+.invariantRow {
+  border: 1px solid #365a74;
+  border-radius: 10px;
+  background: rgba(8, 17, 27, 0.75);
+  padding: 8px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.invariantRow input {
+  width: 17px;
+  height: 17px;
+  margin: 0;
+}
+
+.invariantCopy {
+  display: grid;
+  gap: 3px;
+}
+
+.invariantCopy strong {
+  color: #d9ebf9;
+}
+
+.invariantCopy small {
+  color: #9db8cc;
+  line-height: 1.3;
+}
+
 .couplingColumns {
   display: grid;
   gap: 10px;
@@ -791,6 +827,38 @@ button:disabled {
 .plannerSummaryPanel h4,
 .plannerSummaryPanel p {
   margin: 0;
+}
+
+.syncMatrixPanel {
+  gap: 8px;
+}
+
+.syncTableWrap {
+  overflow-x: auto;
+}
+
+.syncTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.84rem;
+}
+
+.syncTable th,
+.syncTable td {
+  border: 1px solid #365a74;
+  padding: 6px 8px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.syncTable th {
+  background: rgba(22, 36, 52, 0.84);
+  color: #a8c7de;
+  font-weight: 700;
+}
+
+.syncTable td {
+  color: #d0e3f2;
 }
 
 .stabilityBar {

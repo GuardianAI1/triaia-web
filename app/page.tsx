@@ -2,6 +2,29 @@
 
 import Image from "next/image";
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  CoreActiveState,
+  CoreStateCode,
+  CoreSurfaceState,
+  CoreSeverity,
+  CoreAssistantResponse as BoundaryAssistantResponse,
+  EvaluateStructuralStateResponse,
+  ProposeInvariantsResponse,
+  PlannerSignal as CorePlannerSignal,
+  ValidatePlanResponse,
+  assistantChat as requestBoundaryAssistant,
+  evaluateStructuralState as requestStructuralState,
+  proposeInvariants as requestInvariantProposal,
+  validatePlan as requestValidatePlan
+} from "@/app/lib/core-boundary";
+import { buildValidatePlanPayload } from "@/app/lib/plan-builder";
+import {
+  LifecycleEvent,
+  LifecycleObservedState,
+  LifecycleRuntime,
+  advanceLifecycle,
+  createLifecycleRuntime
+} from "@/app/lib/lifecycle";
 
 type Screen = "activation" | "regime" | "configuration" | "coupling" | "dashboard";
 type Regime = "hard" | "soft" | "resource";
@@ -77,6 +100,7 @@ interface StoredPlan {
   planIdentifier: string;
   planDomain: string;
   contractDocuments: ContractDocument[];
+  invariants: InvariantField[];
   regime: Regime;
   structuralMode: StructuralMode;
   hardBoundary: string;
@@ -130,13 +154,16 @@ interface ChatMessage {
   text: string;
 }
 
-interface CoreAssistantResponse {
-  reply?: string;
-  provider?: string;
-  model?: string;
-  response_style?: string;
-  response_length?: string;
-  error?: string;
+interface CoreEvaluationState {
+  payload: EvaluateStructuralStateResponse;
+  receivedAtIso: string;
+}
+
+interface InvariantField {
+  key: string;
+  label: string;
+  critical: boolean;
+  verified: boolean;
 }
 
 interface BoardingPassExtraction {
@@ -214,8 +241,9 @@ interface DocumentReadiness {
   label: string;
 }
 
-const STATUS_STRIP = "LOCAL NODE | DETERMINISTIC ENGINE | CAPACITY-AWARE | NO REMOTE STORAGE";
-const LOCAL_NODE_INDICATOR = "NODE: LOCAL | ENGINE: DETERMINISTIC | LLM: VOICE LAYER | DATA PERSISTENCE: ZERO";
+const STATUS_STRIP = "LOCAL NODE | DETERMINISTIC ENGINE | CAPACITY-AWARE | NO REMOTE TRAJECTORY STORAGE";
+const LOCAL_NODE_INDICATOR =
+  "NODE: LOCAL | ENGINE: DETERMINISTIC | LLM: VOICE LAYER | TRAJECTORY STORAGE: LOCAL ONLY";
 const STORAGE_KEY = "triaia_local_plans_v1";
 const PLANNER_AUTH_STORAGE_KEY = "triaia_planner_auth_v1";
 const DEMO_COUPLINGS: CouplingKey[] = ["geospatial", "weather", "planner"];
@@ -228,9 +256,28 @@ const DEFAULT_PLANNER_SIGNAL: PlannerSignal = {
 };
 const PLANNER_SCOPE_HINTS: Record<PlannerProvider, string> = {
   todoist: "Todoist scope: data:read",
-  google_tasks: "Google Tasks scope: tasks.readonly",
-  notion: "Notion integration: read-only",
+  google_tasks: "Google Tasks read-only adapter is coming soon in UI.",
+  notion: "Notion read-only adapter is coming soon in UI.",
   ical: "iCal local feed: no OAuth required"
+};
+
+const CORE_REASON_COPY: Record<string, string> = {
+  CONTRACT_INTEGRITY_FAILURE: "Boundary integrity failed.",
+  CONTRACT_INTEGRITY_ESSENTIAL_COMPONENT_MISSING: "Essential component missing.",
+  CONTRACT_INTEGRITY_DEPARTURE_TIME_MISSING: "Departure time not confirmed.",
+  CONTRACT_INTEGRITY_BOUNDARY_INFORMATION_INCOMPLETE: "Boundary information incomplete.",
+  CONTRACT_INTEGRITY_REQUIRED_ITEM_UNVERIFIED: "Required item not verified.",
+  ALIGNMENT_WINDOW_EXHAUSTED: "Arrival time no longer within safe window.",
+  ALIGNMENT_ROUTE_UNSAFE: "Current route may not reach boundary on time.",
+  ALIGNMENT_MARGIN_SHRINKING: "Time margin shrinking.",
+  ALIGNMENT_STABLE: "Alignment stable.",
+  STABILITY_PERSISTENCE_GATE_TRIGGERED: "Sustained instability detected.",
+  STABILITY_PLAN_COMPROMISED: "Plan stability compromised.",
+  STABILITY_TRAJECTORY_UNSTABLE: "Trajectory unstable.",
+  LOAD_SUSTAINED: "Sustained load detected.",
+  LOAD_INCREASING: "Execution pressure increasing.",
+  LOAD_RECOVERY_MISMATCH: "Recovery not matching load.",
+  LOAD_RECOVERING: "Capacity recovering."
 };
 
 const ASSISTANT_INTRO =
@@ -517,6 +564,18 @@ const CONTRACT_DOCUMENT_TYPE_OPTIONS: Array<{ value: ContractDocumentType; label
   { value: "transport_booking", label: "Ground transport booking" },
   { value: "visa_or_id", label: "Visa / ID requirement" },
   { value: "other", label: "Other contract document" }
+];
+
+const PLAN_DOMAIN_OPTIONS: Array<{ value: string; label: string }> = [
+  { value: "", label: "Select domain (optional)" },
+  { value: "finance", label: "Finance" },
+  { value: "medical", label: "Medical" },
+  { value: "travel", label: "Travel" },
+  { value: "gaming", label: "Gaming" },
+  { value: "legal", label: "Legal" },
+  { value: "education", label: "Education" },
+  { value: "operations", label: "Operations" },
+  { value: "other", label: "Other" }
 ];
 
 const CONTRACT_DOCUMENT_TYPE_LABELS: Record<ContractDocumentType, string> = {
@@ -835,6 +894,19 @@ function describeBoundary(plan: Pick<StoredPlan, "regime" | "hardBoundary" | "so
   return plan.resourceConstraint || "Resource-bound";
 }
 
+function formatSyncMetric(value: number | boolean | undefined): string {
+  if (typeof value === "boolean") {
+    return value ? "Yes" : "No";
+  }
+  if (typeof value === "number") {
+    if (Number.isInteger(value)) {
+      return String(value);
+    }
+    return value.toFixed(3);
+  }
+  return "--";
+}
+
 function stabilityFromScore(score: number): StabilityState {
   if (score >= 70) {
     return "stable";
@@ -843,6 +915,62 @@ function stabilityFromScore(score: number): StabilityState {
     return "strained";
   }
   return "critical";
+}
+
+function stabilityFromCoreSeverity(severity: CoreSeverity): StabilityState {
+  if (severity === "green") {
+    return "stable";
+  }
+  if (severity === "amber") {
+    return "strained";
+  }
+  return "critical";
+}
+
+function interventionFromCoreState(
+  interventionState: EvaluateStructuralStateResponse["intervention_state"]
+): InterventionState {
+  if (interventionState === "plan_b") {
+    return "PLAN B";
+  }
+  if (interventionState === "deviate") {
+    return "DEVIATE";
+  }
+  if (interventionState === "pause") {
+    return "PAUSE";
+  }
+  return "CONTINUE";
+}
+
+function coreReasonText(reasonCode: string): string {
+  return CORE_REASON_COPY[reasonCode] ?? reasonCode.replace(/_/g, " ").toLowerCase();
+}
+
+function lifecycleStateLabel(stateCode: CoreStateCode): string {
+  if (stateCode === "structural_break") {
+    return "STRUCTURAL BREAK";
+  }
+  if (stateCode === "alignment_degrading") {
+    return "ALIGNMENT DEGRADING";
+  }
+  if (stateCode === "stability_warning") {
+    return "STABILITY WARNING";
+  }
+  if (stateCode === "capacity_under_load") {
+    return "CAPACITY UNDER LOAD";
+  }
+  return "INFORMATIONAL STATE";
+}
+
+function mapSurfaceToLifecycleObserved(surface: CoreSurfaceState): LifecycleObservedState[] {
+  const states = Array.isArray(surface.active_states) ? surface.active_states : [surface];
+  return states.map((state) => ({
+    stateCode: state.state_code,
+    severity: state.severity,
+    reasonCodes: Array.isArray(state.reason_codes) ? state.reason_codes : [],
+    primaryKey: state.ui_copy?.primary_key || "STATE_INFORMATION",
+    fallbackText: state.ui_copy?.fallback_text || "State updated."
+  }));
 }
 
 function deriveWeatherRisk(values: {
@@ -1601,6 +1729,106 @@ function buildSnapshot(params: {
   };
 }
 
+function buildSnapshotFromCore(params: {
+  activeRegime: Regime;
+  hardBoundary: string;
+  softObjective: string;
+  resourceConstraint: string;
+  documentReadiness: DocumentReadiness;
+  couplingCount: number;
+  evaluation: EvaluateStructuralStateResponse;
+}): Snapshot {
+  const { activeRegime, hardBoundary, softObjective, resourceConstraint, documentReadiness, couplingCount, evaluation } =
+    params;
+
+  const loadTotal = Math.max(0, Math.min(3, Number(evaluation.load_components?.total_load ?? 0)));
+  const uncertaintyScore = clamp((1 - loadTotal / 3) * 100, 5, 95);
+  const overallIndex = clamp(Number(evaluation.stability_index) * 100, 0, 100);
+  const boundaryScore = clamp(Number(evaluation.contract_integrity_score) * 100, 0, 100);
+  const capacityScore = clamp(Number(evaluation.capacity) * 100, 0, 100);
+  const intervention = interventionFromCoreState(evaluation.intervention_state);
+  const stability = stabilityFromCoreSeverity(evaluation.surface_state.severity);
+
+  let remainingMargin = "--";
+  if (activeRegime === "hard") {
+    const hardDate = parseDeadline(hardBoundary);
+    remainingMargin = hardDate
+      ? `${formatCountdown(Math.max(0, (hardDate.getTime() - Date.now()) / 60000))} to boundary`
+      : "Boundary not configured";
+  } else if (activeRegime === "soft") {
+    remainingMargin = softObjective.trim() ? "Objective-bound integrity channel" : "Objective descriptor required";
+  } else {
+    remainingMargin = resourceConstraint.trim() ? "Resource-constrained margin channel" : "Resource constraint required";
+  }
+
+  const capacityLevel =
+    capacityScore >= 80
+      ? "Nominal"
+      : capacityScore >= 60
+        ? "Buffered"
+        : capacityScore >= 40
+          ? "Tension-adjusted"
+          : "Critical load";
+
+  const uncertaintyEnvelope = couplingCount >= 5 ? "NARROW" : couplingCount >= 2 ? "MODERATE" : "WIDE";
+
+  return {
+    remainingMargin,
+    capacityLevel,
+    uncertaintyEnvelope,
+    regimeClassification: `${activeRegime.toUpperCase()} REGIME`,
+    intervention,
+    stability,
+    boundaryScore,
+    capacityScore,
+    uncertaintyScore,
+    overallIndex,
+    documentCoverage: documentReadiness.coverage,
+    documentLinked: documentReadiness.linkedExpectedCount,
+    documentExpected: documentReadiness.expectedCount,
+    documentReadinessLabel: documentReadiness.label
+  };
+}
+
+function buildPendingCoreSnapshot(params: {
+  activeRegime: Regime;
+  hardBoundary: string;
+  softObjective: string;
+  resourceConstraint: string;
+  documentReadiness: DocumentReadiness;
+}): Snapshot {
+  const { activeRegime, hardBoundary, softObjective, resourceConstraint, documentReadiness } = params;
+
+  let remainingMargin = "Awaiting core state";
+  if (activeRegime === "hard") {
+    const hardDate = parseDeadline(hardBoundary);
+    remainingMargin = hardDate
+      ? `${formatCountdown(Math.max(0, (hardDate.getTime() - Date.now()) / 60000))} to boundary`
+      : "Boundary not configured";
+  } else if (activeRegime === "soft") {
+    remainingMargin = softObjective.trim() ? "Objective-bound integrity channel" : "Objective descriptor required";
+  } else if (activeRegime === "resource") {
+    remainingMargin = resourceConstraint.trim() ? "Resource-constrained margin channel" : "Resource constraint required";
+  }
+
+  return {
+    remainingMargin,
+    capacityLevel: "Awaiting core state",
+    uncertaintyEnvelope: "Awaiting core state",
+    regimeClassification: `${activeRegime.toUpperCase()} REGIME`,
+    intervention: "CONTINUE",
+    stability: "strained",
+    boundaryScore: 0,
+    capacityScore: 0,
+    uncertaintyScore: 0,
+    overallIndex: 0,
+    documentCoverage: documentReadiness.coverage,
+    documentLinked: documentReadiness.linkedExpectedCount,
+    documentExpected: documentReadiness.expectedCount,
+    documentReadinessLabel: documentReadiness.label
+  };
+}
+
 function interventionChoices(regime: Regime): string[] {
   if (regime === "hard") {
     return ["Activate Plan B", "Adjust Within Boundary", "Continue (Risk Acknowledged)"];
@@ -1914,32 +2142,16 @@ function buildLocalVoiceFallback(params: {
     .join(" ");
 }
 
-async function requestAssistantFromCore(prompt: string): Promise<CoreAssistantResponse> {
-  const response = await fetch("/api/core/assistant_chat", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      message: prompt,
-      response_style: "tactical",
-      response_length: "short"
-    }),
-    cache: "no-store"
+async function requestAssistantFromCore(params: {
+  prompt: string;
+  missionId?: string;
+}): Promise<BoundaryAssistantResponse> {
+  return requestBoundaryAssistant({
+    message: params.prompt,
+    mission_id: params.missionId,
+    response_style: "tactical",
+    response_length: "short"
   });
-
-  let payload: CoreAssistantResponse = {};
-  try {
-    payload = (await response.json()) as CoreAssistantResponse;
-  } catch {
-    payload = {};
-  }
-
-  if (!response.ok) {
-    throw new Error(payload.error || `Assistant request failed (${response.status}).`);
-  }
-
-  return payload;
 }
 
 export default function HomePage() {
@@ -1988,6 +2200,14 @@ export default function HomePage() {
   const [plannerSignal, setPlannerSignal] = useState<PlannerSignal | null>(null);
   const [plannerSignalWeight, setPlannerSignalWeight] = useState(1);
   const [plannerWarning, setPlannerWarning] = useState("");
+  const [coreEvaluation, setCoreEvaluation] = useState<CoreEvaluationState | null>(null);
+  const [coreValidation, setCoreValidation] = useState<ValidatePlanResponse | null>(null);
+  const [coreStateError, setCoreStateError] = useState("");
+  const [coreLifecycle, setCoreLifecycle] = useState<LifecycleRuntime>(() => createLifecycleRuntime(Date.now()));
+  const [lifecycleEvents, setLifecycleEvents] = useState<LifecycleEvent[]>([]);
+  const [invariantFields, setInvariantFields] = useState<InvariantField[]>([]);
+  const [invariantNote, setInvariantNote] = useState("");
+  const [invariantLoading, setInvariantLoading] = useState(false);
 
   const [assistantInput, setAssistantInput] = useState("");
   const [assistantMessages, setAssistantMessages] = useState<ChatMessage[]>([message("assistant", ASSISTANT_INTRO)]);
@@ -2032,6 +2252,7 @@ export default function HomePage() {
               ...INITIAL_COUPLINGS,
               ...(candidate.couplings ?? {})
             },
+            invariants: Array.isArray(candidate.invariants) ? (candidate.invariants as InvariantField[]) : [],
             contractDocuments: Array.isArray(candidate.contractDocuments)
               ? candidate.contractDocuments
               : []
@@ -2045,7 +2266,6 @@ export default function HomePage() {
       if (plannerRaw) {
         const plannerParsed = JSON.parse(plannerRaw) as Partial<{
           provider: PlannerProvider;
-          token: string;
           iCalUrl: string;
         }>;
         if (
@@ -2055,9 +2275,6 @@ export default function HomePage() {
           plannerParsed.provider === "ical"
         ) {
           setPlannerProvider(plannerParsed.provider);
-        }
-        if (typeof plannerParsed.token === "string") {
-          setPlannerToken(plannerParsed.token);
         }
         if (typeof plannerParsed.iCalUrl === "string") {
           setPlannerIcalUrl(plannerParsed.iCalUrl);
@@ -2083,14 +2300,13 @@ export default function HomePage() {
         PLANNER_AUTH_STORAGE_KEY,
         JSON.stringify({
           provider: plannerProvider,
-          token: plannerToken,
           iCalUrl: plannerIcalUrl
         })
       );
     } catch {
       // Ignore local storage write errors.
     }
-  }, [plannerProvider, plannerToken, plannerIcalUrl]);
+  }, [plannerProvider, plannerIcalUrl]);
 
   const stopBoundaryScannerSession = useCallback(() => {
     if (scannerIntervalRef.current) {
@@ -2428,6 +2644,7 @@ export default function HomePage() {
 
   const couplingCount = useMemo(() => countCouplings(couplings), [couplings]);
   const activeRegime = regime ?? "hard";
+  const isActiveDashboard = screen === "dashboard" && Boolean(currentPlanId);
   const contractDocumentPolicyText = useMemo(
     () => buildContractDocumentPolicyText(contractDocuments),
     [contractDocuments]
@@ -2462,7 +2679,7 @@ export default function HomePage() {
     [contractDocuments, suggestedDocuments]
   );
 
-  const snapshot = useMemo(
+  const fallbackSnapshot = useMemo(
     () =>
       buildSnapshot({
         regime: activeRegime,
@@ -2482,7 +2699,7 @@ export default function HomePage() {
         plannerSignal,
         plannerStatus,
         plannerSignalWeight,
-        documentReadiness
+      documentReadiness
       }),
     [
       activeRegime,
@@ -2505,6 +2722,40 @@ export default function HomePage() {
       documentReadiness
     ]
   );
+
+  const snapshot = useMemo(() => {
+    if (!coreEvaluation) {
+      if (isActiveDashboard) {
+        return buildPendingCoreSnapshot({
+          activeRegime,
+          hardBoundary,
+          softObjective,
+          resourceConstraint,
+          documentReadiness
+        });
+      }
+      return fallbackSnapshot;
+    }
+    return buildSnapshotFromCore({
+      activeRegime,
+      hardBoundary,
+      softObjective,
+      resourceConstraint,
+      documentReadiness,
+      couplingCount,
+      evaluation: coreEvaluation.payload
+    });
+  }, [
+    coreEvaluation,
+    fallbackSnapshot,
+    isActiveDashboard,
+    activeRegime,
+    hardBoundary,
+    softObjective,
+    resourceConstraint,
+    documentReadiness,
+    couplingCount
+  ]);
 
   useEffect(() => {
     setStabilityHistory((previous) => {
@@ -2540,8 +2791,55 @@ export default function HomePage() {
     return Boolean(current && current.status === "active");
   }, [screen, currentPlanId, plans]);
 
+  const dominantLifecycleState = coreLifecycle.dominantState;
+  const activeLifecycleStates = coreLifecycle.activeStates;
+  const dominantLifecycleReason = useMemo(() => {
+    if (!dominantLifecycleState) {
+      return "";
+    }
+    if (dominantLifecycleState.reasonCodes.length > 0) {
+      return coreReasonText(dominantLifecycleState.reasonCodes[0]);
+    }
+    return dominantLifecycleState.fallbackText;
+  }, [dominantLifecycleState]);
+  const secondaryLifecycleStates = useMemo(
+    () => activeLifecycleStates.filter((state) => state.stateCode !== dominantLifecycleState?.stateCode),
+    [activeLifecycleStates, dominantLifecycleState]
+  );
+  const synchronizationRows = useMemo(() => {
+    const matrix = coreValidation?.derived_metrics?.synchronization_matrix;
+    if (!matrix) {
+      return [];
+    }
+    const rows: Array<{
+      actorA: string;
+      actorB: string;
+      resourcePressure: number | boolean | undefined;
+      timelineGap: number | boolean | undefined;
+      crossDependencies: number | boolean | undefined;
+      mutualDependency: number | boolean | undefined;
+      budgetInterdependence: number | boolean | undefined;
+    }> = [];
+
+    for (const [actorA, pairEntries] of Object.entries(matrix)) {
+      for (const [actorB, metrics] of Object.entries(pairEntries)) {
+        rows.push({
+          actorA,
+          actorB,
+          resourcePressure: metrics.resource_pressure,
+          timelineGap: metrics.timeline_gap,
+          crossDependencies: metrics.cross_dependencies,
+          mutualDependency: metrics.mutual_dependency,
+          budgetInterdependence: metrics.budget_interdependence
+        });
+      }
+    }
+    return rows;
+  }, [coreValidation]);
+  const isPlannerProviderComingSoon = plannerProvider === "google_tasks" || plannerProvider === "notion";
+
   const treeNodes: TreeNode[] = useMemo(() => {
-    return [
+    const nodes: TreeNode[] = [
       {
         id: "root",
         label: `Root Contract — ${planIdentifier.trim() || "UNASSIGNED"}`,
@@ -2571,7 +2869,30 @@ export default function HomePage() {
         margin: `${Math.round(snapshot.uncertaintyScore)} certainty index`
       }
     ];
-  }, [planIdentifier, snapshot, couplingCount]);
+
+    for (const invariant of invariantFields) {
+      nodes.push({
+        id: `invariant-${invariant.key}`,
+        label: invariant.label,
+        stability: invariant.verified ? "stable" : "critical",
+        capacity: invariant.verified ? "Verified" : "Unverified",
+        margin: invariant.critical ? "Critical invariant" : "Optional invariant"
+      });
+    }
+
+    const syncPairs = Number(coreValidation?.derived_metrics?.synchronization_pair_count ?? 0);
+    if (syncPairs > 0) {
+      nodes.push({
+        id: "synchronization",
+        label: "Multi-Partner Synchronization Matrix",
+        stability: syncPairs > 2 ? "strained" : "stable",
+        capacity: `${syncPairs} actor pairs`,
+        margin: "Deterministic overlap telemetry"
+      });
+    }
+
+    return nodes;
+  }, [planIdentifier, snapshot, couplingCount, invariantFields, coreValidation]);
 
   const hardBoundaryMinutes = useMemo(() => {
     const parsed = parseDeadline(hardBoundary);
@@ -2585,9 +2906,35 @@ export default function HomePage() {
     () => formatBoundaryTimestamp(activeRegime, hardBoundary),
     [activeRegime, hardBoundary]
   );
+
+  const coreStateCriteria = useMemo(() => {
+    if (!coreEvaluation) {
+      return [];
+    }
+    const states = coreEvaluation.payload.surface_state.active_states;
+    const orderedCodes: string[] = [];
+    for (const state of states) {
+      for (const reasonCode of state.reason_codes) {
+        if (!orderedCodes.includes(reasonCode)) {
+          orderedCodes.push(reasonCode);
+        }
+      }
+    }
+    return orderedCodes.map(coreReasonText);
+  }, [coreEvaluation]);
+
   const stateCriteria = useMemo(
-    () =>
-      describeStateCriteria({
+    () => {
+      if (coreStateCriteria.length > 0) {
+        return coreStateCriteria.slice(0, 6);
+      }
+      if (isActiveDashboard) {
+        if (coreStateError) {
+          return [`Core evaluation unavailable: ${coreStateError}`];
+        }
+        return ["Awaiting core state evaluation."];
+      }
+      return describeStateCriteria({
         regime: activeRegime,
         structuralMode,
         hardBoundaryMinutes,
@@ -2603,8 +2950,12 @@ export default function HomePage() {
         plannerSignalWeight,
         documentReadiness,
         snapshot
-      }),
+      });
+    },
     [
+      coreStateCriteria,
+      isActiveDashboard,
+      coreStateError,
       activeRegime,
       structuralMode,
       hardBoundaryMinutes,
@@ -2629,6 +2980,223 @@ export default function HomePage() {
     return stabilityHistory[stabilityHistory.length - 1] - stabilityHistory[stabilityHistory.length - 2];
   }, [stabilityHistory]);
   const stabilityTrendLabel = useMemo(() => trendDescriptor(stabilityTrendDelta), [stabilityTrendDelta]);
+
+  const contractId = useMemo(() => {
+    if (currentPlanId) {
+      return currentPlanId;
+    }
+    const fallback = planIdentifier.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-");
+    return fallback ? `plan-${fallback}` : "plan-unassigned";
+  }, [currentPlanId, planIdentifier]);
+
+  const invariantsMap = useMemo(() => {
+    const next: Record<string, boolean> = {};
+    for (const invariant of invariantFields) {
+      next[invariant.key] = invariant.verified;
+    }
+    return next;
+  }, [invariantFields]);
+
+  const environmentalLoad = useMemo(() => {
+    if (!couplings.weather || !weatherSignal) {
+      return 0.0;
+    }
+    if (weatherSignal.risk === "high") {
+      return 0.75;
+    }
+    if (weatherSignal.risk === "moderate") {
+      return 0.45;
+    }
+    return 0.15;
+  }, [couplings.weather, weatherSignal]);
+
+  const etaMinutes = useMemo(() => {
+    if (activeRegime === "hard" && hardBoundaryMinutes !== null) {
+      return Math.max(5, Math.round(hardBoundaryMinutes * 0.8));
+    }
+    if (plannerSignal) {
+      return Math.max(30, plannerSignal.dueNext24h * 45);
+    }
+    return 720;
+  }, [activeRegime, hardBoundaryMinutes, plannerSignal]);
+
+  const timeRemainingMinutesForCore = useMemo(() => {
+    if (activeRegime === "hard" && hardBoundaryMinutes !== null) {
+      return Math.max(1, hardBoundaryMinutes);
+    }
+    return 1440;
+  }, [activeRegime, hardBoundaryMinutes]);
+
+  const fetchCoreState = useCallback(
+    async (): Promise<EvaluateStructuralStateResponse | null> => {
+      if (!consentAccepted || !currentPlanId) {
+        return null;
+      }
+
+      const plannerForCore: CorePlannerSignal | undefined = plannerSignal
+        ? {
+            totalTasks: plannerSignal.totalTasks,
+            completedTasks: plannerSignal.completedTasks,
+            overdueTasks: plannerSignal.overdueTasks,
+            dueNext24h: plannerSignal.dueNext24h,
+            lastUpdated: plannerSignal.lastUpdated
+          }
+        : undefined;
+
+      const validatePayload = buildValidatePlanPayload({
+        regime: activeRegime,
+        hardBoundaryMinutes,
+        plannerSignal,
+        documents: contractDocuments
+      });
+
+      const [evaluation, validation] = await Promise.all([
+        requestStructuralState({
+          contract_id: contractId,
+          invariants: invariantsMap,
+          eta_minutes: etaMinutes,
+          time_remaining_minutes: timeRemainingMinutesForCore,
+          planner_signal: plannerForCore,
+          environmental_load: environmentalLoad,
+          threshold: 0.6,
+          evaluation_interval_seconds: 1,
+          alignment_lambda: 1.0
+        }),
+        requestValidatePlan(validatePayload)
+      ]);
+
+      setCoreEvaluation({
+        payload: evaluation,
+        receivedAtIso: nowIso()
+      });
+      setCoreValidation(validation);
+      setCoreStateError("");
+
+      const observedStates = mapSurfaceToLifecycleObserved(evaluation.surface_state);
+      setCoreLifecycle((previous) => {
+        const next = advanceLifecycle(previous, observedStates, Date.now());
+        if (next.events.length > 0) {
+          setLifecycleEvents((prior) => [...next.events, ...prior].slice(0, 24));
+        }
+        return next;
+      });
+
+      const requiresManualIntervention =
+        evaluation.surface_state.state_code === "structural_break" ||
+        evaluation.surface_state.state_code === "stability_warning";
+      if (structuralMode === "manual" && requiresManualIntervention) {
+        setShowInterventionModal(true);
+      }
+
+      return evaluation;
+    },
+    [
+      consentAccepted,
+      currentPlanId,
+      plannerSignal,
+      activeRegime,
+      hardBoundaryMinutes,
+      contractDocuments,
+      contractId,
+      invariantsMap,
+      etaMinutes,
+      timeRemainingMinutesForCore,
+      environmentalLoad,
+      structuralMode
+    ]
+  );
+
+  useEffect(() => {
+    if (!consentAccepted || !regime) {
+      return;
+    }
+
+    let cancelled = false;
+    setInvariantLoading(true);
+    requestInvariantProposal({
+      regime,
+      context: policySourceText,
+      plan_identifier: planIdentifier.trim(),
+      domain: planDomain.trim()
+    })
+      .then((payload: ProposeInvariantsResponse) => {
+        if (cancelled) {
+          return;
+        }
+        setInvariantFields((previous) => {
+          const previousByKey = new Map(previous.map((item) => [item.key, item]));
+          return payload.invariants.map((item) => ({
+            key: item.key,
+            label: item.label,
+            critical: Boolean(item.critical),
+            verified: previousByKey.get(item.key)?.verified ?? false
+          }));
+        });
+        setInvariantNote(payload.note || "");
+      })
+      .catch(() => {
+        if (cancelled) {
+          return;
+        }
+        setInvariantNote("Invariant template unavailable. Use manual invariant verification.");
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setInvariantLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [consentAccepted, regime, policySourceText, planIdentifier, planDomain]);
+
+  useEffect(() => {
+    if (invariantFields.length === 0) {
+      return;
+    }
+    const hasTicketDocument = contractDocuments.some(
+      (document) =>
+        hasDocumentSignal(document) &&
+        (document.docType === "flight_itinerary" || document.docType === "boarding_pass")
+    );
+    const hasIdentityDocument = contractDocuments.some(
+      (document) => hasDocumentSignal(document) && document.docType === "visa_or_id"
+    );
+    const boundaryConfigured = Boolean(parseDeadline(hardBoundary));
+
+    setInvariantFields((previous) =>
+      previous.map((item) => {
+        if (item.verified) {
+          return item;
+        }
+        if (item.key === "ticket_verified" && hasTicketDocument) {
+          return { ...item, verified: true };
+        }
+        if (item.key === "passport_or_id_verified" && hasIdentityDocument) {
+          return { ...item, verified: true };
+        }
+        if ((item.key === "departure_time_locked" || item.key === "boundary_time_locked") && boundaryConfigured) {
+          return { ...item, verified: true };
+        }
+        return item;
+      })
+    );
+  }, [contractDocuments, hardBoundary, invariantFields.length]);
+
+  useEffect(() => {
+    if (!chatAvailable || !consentAccepted) {
+      return;
+    }
+    void fetchCoreState();
+    const intervalId = window.setInterval(() => {
+      void fetchCoreState();
+    }, 5_000);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [chatAvailable, consentAccepted, fetchCoreState]);
 
   function clearLongPressTimer() {
     if (longPressTimeout.current) {
@@ -2778,6 +3346,12 @@ export default function HomePage() {
     setContractDocuments((previous) => previous.filter((document) => document.id !== docId));
   }
 
+  function setInvariantVerified(invariantKey: string, verified: boolean) {
+    setInvariantFields((previous) =>
+      previous.map((item) => (item.key === invariantKey ? { ...item, verified } : item))
+    );
+  }
+
   function buildCurrentPlanRecord(nextStatus: PlanStatus, forceId?: string): StoredPlan {
     const createdAt = nowIso();
     const planId = forceId ?? currentPlanId ?? uid();
@@ -2788,6 +3362,7 @@ export default function HomePage() {
       planIdentifier: planIdentifier.trim() || "UNASSIGNED",
       planDomain: planDomain.trim(),
       contractDocuments: contractDocuments.map((document) => ({ ...document })),
+      invariants: invariantFields.map((invariant) => ({ ...invariant })),
       regime: activeRegime,
       structuralMode,
       hardBoundary,
@@ -2813,6 +3388,7 @@ export default function HomePage() {
     setPlanIdentifier(record.planIdentifier);
     setPlanDomain(record.planDomain ?? "");
     setContractDocuments(Array.isArray(record.contractDocuments) ? record.contractDocuments : []);
+    setInvariantFields(Array.isArray(record.invariants) ? record.invariants : []);
     setHardBoundary(record.hardBoundary);
     setSoftObjective(record.softObjective);
     setResourceConstraint(record.resourceConstraint);
@@ -2823,6 +3399,11 @@ export default function HomePage() {
     setShowInterventionModal(false);
     setAdvancedVisible(false);
     setFormError("");
+    setCoreEvaluation(null);
+    setCoreValidation(null);
+    setCoreStateError("");
+    setCoreLifecycle(createLifecycleRuntime(Date.now()));
+    setLifecycleEvents([]);
     setStabilityHistory([]);
     setScreen(destination);
   }
@@ -2863,6 +3444,11 @@ export default function HomePage() {
     setCheckCount(planToActivate.checkCount);
     setViolationStreak(planToActivate.violationStreak);
     setCheckFeedback("");
+    setCoreEvaluation(null);
+    setCoreValidation(null);
+    setCoreStateError("");
+    setCoreLifecycle(createLifecycleRuntime(Date.now()));
+    setLifecycleEvents([]);
     setStabilityHistory([]);
     setScreen("dashboard");
     setFormError("");
@@ -2917,7 +3503,9 @@ export default function HomePage() {
     }
 
     if (isBlockedPlan && domainDetection.blockedRule) {
-      setFormError("Plan blocked by policy screening. Revise the contract text and try again.");
+      setFormError(
+        `Plan blocked by policy screening (${domainDetection.blockedRule.label}). Revise the contract text and try again.`
+      );
       return;
     }
 
@@ -2933,7 +3521,9 @@ export default function HomePage() {
 
     if (isBlockedPlan && domainDetection.blockedRule) {
       setScreen("configuration");
-      setFormError("Plan blocked by policy screening. Revise the contract text and try again.");
+      setFormError(
+        `Plan blocked by policy screening (${domainDetection.blockedRule.label}). Revise the contract text and try again.`
+      );
       return;
     }
 
@@ -2948,6 +3538,9 @@ export default function HomePage() {
     setCheckCount(0);
     setViolationStreak(0);
     finalizeActivation({ ...candidate, checkCount: 0, violationStreak: 0 }, false);
+    window.setTimeout(() => {
+      void fetchCoreState().catch(() => null);
+    }, 0);
   }
 
   function persistCurrentPlanSnapshot(nextCheckCount: number, nextViolationStreak: number) {
@@ -2966,6 +3559,7 @@ export default function HomePage() {
           planIdentifier: planIdentifier.trim() || "UNASSIGNED",
           planDomain: planDomain.trim(),
           contractDocuments: contractDocuments.map((document) => ({ ...document })),
+          invariants: invariantFields.map((invariant) => ({ ...invariant })),
           regime: activeRegime,
           structuralMode,
           hardBoundary,
@@ -2985,25 +3579,40 @@ export default function HomePage() {
     );
   }
 
-  function runDeterministicCheck() {
-    const violation = snapshot.intervention !== "CONTINUE";
-    const nextCheckCount = checkCount + 1;
-    const nextViolationStreak = violation ? violationStreak + 1 : 0;
-
-    setCheckCount(nextCheckCount);
-    setViolationStreak(nextViolationStreak);
-
-    if (violation && nextViolationStreak >= 2) {
-      setShowInterventionModal(true);
+  async function runDeterministicCheck() {
+    if (!chatAvailable) {
+      setCheckFeedback("Activate a plan before running deterministic checks.");
+      return;
     }
 
-    setCheckFeedback(
-      violation
-        ? `Deterministic check #${nextCheckCount} complete. State: ${snapshot.intervention}. Criteria: ${stateCriteria[0] ?? "Structural pressure detected."} Persistence streak: ${nextViolationStreak}.`
-        : `Deterministic check #${nextCheckCount} complete. State remains CONTINUE. Criteria: ${stateCriteria[0] ?? "No elevated structural pressure detected."}`
-    );
+    const nextCheckCount = checkCount + 1;
+    setCheckCount(nextCheckCount);
+    setCoreStateError("");
 
-    persistCurrentPlanSnapshot(nextCheckCount, nextViolationStreak);
+    try {
+      const evaluation = await fetchCoreState();
+      if (!evaluation) {
+        setCheckFeedback("Deterministic check skipped: no active contract context.");
+        persistCurrentPlanSnapshot(nextCheckCount, violationStreak);
+        return;
+      }
+
+      const dominant = evaluation.surface_state;
+      const firstReason = dominant.reason_codes[0];
+      const reasonText = firstReason ? coreReasonText(firstReason) : dominant.ui_copy.fallback_text;
+      const hasViolation = dominant.state_code !== "informational";
+      const nextViolationStreak = hasViolation ? violationStreak + 1 : 0;
+      setViolationStreak(nextViolationStreak);
+      setCheckFeedback(
+        `Deterministic check #${nextCheckCount} complete. State: ${dominant.state_code}. Severity: ${dominant.severity}. ${reasonText}`
+      );
+      persistCurrentPlanSnapshot(nextCheckCount, nextViolationStreak);
+    } catch (caught) {
+      const detail = caught instanceof Error ? caught.message : "Core evaluation failed.";
+      setCoreStateError(detail);
+      setCheckFeedback(`Deterministic check failed: ${detail}`);
+      persistCurrentPlanSnapshot(nextCheckCount, violationStreak);
+    }
   }
 
   function applyInterventionChoice() {
@@ -3028,7 +3637,9 @@ export default function HomePage() {
     if (storedDetection.blockedRule) {
       setShowPlans(false);
       loadPlan({ ...plan, status: "paused" }, "configuration");
-      setFormError("Stored plan blocked by policy screening. Revise the contract text before activation.");
+      setFormError(
+        `Stored plan blocked by policy screening (${storedDetection.blockedRule.label}). Revise the contract text before activation.`
+      );
       return;
     }
 
@@ -3054,6 +3665,9 @@ export default function HomePage() {
     loadPlan(candidate, "dashboard");
     finalizeActivation(candidate, false);
     setShowPlans(false);
+    window.setTimeout(() => {
+      void fetchCoreState().catch(() => null);
+    }, 0);
   }
 
   function setPlanStatus(planId: string, status: PlanStatus) {
@@ -3075,6 +3689,11 @@ export default function HomePage() {
         setScreen("activation");
         setCurrentPlanId(null);
         setShowInterventionModal(false);
+        setCoreEvaluation(null);
+        setCoreValidation(null);
+        setCoreStateError("");
+        setCoreLifecycle(createLifecycleRuntime(Date.now()));
+        setLifecycleEvents([]);
       }
     }
   }
@@ -3109,6 +3728,11 @@ export default function HomePage() {
     setPlannerSignal(null);
     setPlannerSignalWeight(1);
     setPlannerWarning("");
+    setCoreEvaluation(null);
+    setCoreValidation(null);
+    setCoreStateError("");
+    setCoreLifecycle(createLifecycleRuntime(Date.now()));
+    setLifecycleEvents([]);
     setCurrentPlanId(null);
     setEnginePowering(false);
     setFormError("");
@@ -3128,6 +3752,9 @@ export default function HomePage() {
     setScannerPayloadInput("");
     setScanCandidate(null);
     setLastScanApplied(null);
+    setInvariantFields([]);
+    setInvariantNote("");
+    setInvariantLoading(false);
     setStabilityHistory([]);
   }
 
@@ -3166,7 +3793,10 @@ export default function HomePage() {
         weatherSignal
       });
 
-      const response = await requestAssistantFromCore(prompt);
+      const response = await requestAssistantFromCore({
+        prompt,
+        missionId: currentPlanId ?? undefined
+      });
       const reply = (response.reply || "").trim();
       if (!reply) {
         throw new Error("Assistant returned empty response.");
@@ -3346,17 +3976,21 @@ export default function HomePage() {
                     type="text"
                     value={planIdentifier}
                     onChange={(event) => setPlanIdentifier(event.target.value)}
-                    placeholder="TRIAIA-CONTRACT-001"
+                    placeholder="Go to Blizzcon 2027"
                   />
                 </label>
                 <label>
-                  Domain (enter if applicable)
-                  <input
-                    type="text"
+                  Domain (if applicable)
+                  <select
                     value={planDomain}
                     onChange={(event) => setPlanDomain(event.target.value)}
-                    placeholder="Trip to SF convention - gaming"
-                  />
+                  >
+                    {PLAN_DOMAIN_OPTIONS.map((option) => (
+                      <option key={option.value || "optional"} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
                 </label>
                 <p className="technicalNote domainPolicyNote">
                   Policy screening is active and enforced automatically. Detection is local and keyword-based; Triaia does
@@ -3616,6 +4250,38 @@ export default function HomePage() {
                   + Add Document
                 </button>
               </section>
+
+              <section className="subPanel">
+                <h3>Contract Integrity Invariants</h3>
+                <p className="technicalNote">
+                  Required invariants are proposal-based and verified explicitly. Structural break is immediate when a
+                  required invariant remains unverified.
+                </p>
+                {invariantLoading ? <p className="technicalNote">Loading invariant template...</p> : null}
+                {invariantNote ? <p className="technicalNote">{invariantNote}</p> : null}
+                {invariantFields.length === 0 && !invariantLoading ? (
+                  <p className="technicalNote">No invariant template loaded yet.</p>
+                ) : (
+                  <div className="invariantList">
+                    {invariantFields.map((invariant) => (
+                      <label key={invariant.key} className="invariantRow">
+                        <input
+                          type="checkbox"
+                          checked={invariant.verified}
+                          onChange={(event) => setInvariantVerified(invariant.key, event.target.checked)}
+                        />
+                        <span className="invariantCopy">
+                          <strong>{invariant.label}</strong>
+                          <small>{invariant.critical ? "Required for contract integrity" : "Optional structural signal"}</small>
+                        </span>
+                        <span className={`signalChip ${invariant.verified ? "good" : invariant.critical ? "bad" : "neutral"}`}>
+                          {invariant.verified ? "Verified" : "Unverified"}
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                )}
+              </section>
             </div>
 
             <p className="technicalNote">
@@ -3729,8 +4395,12 @@ export default function HomePage() {
                           >
                             <option value="ical">iCal (local feed)</option>
                             <option value="todoist">Todoist</option>
-                            <option value="google_tasks">Google Tasks</option>
-                            <option value="notion">Notion</option>
+                            <option value="google_tasks" disabled>
+                              Google Tasks (coming soon)
+                            </option>
+                            <option value="notion" disabled>
+                              Notion (coming soon)
+                            </option>
                           </select>
                         </label>
 
@@ -3761,12 +4431,16 @@ export default function HomePage() {
                         <button
                           type="button"
                           className="secondaryAction"
-                          disabled={!plannerConfigReady || plannerStatus === "loading"}
+                          disabled={!plannerConfigReady || plannerStatus === "loading" || isPlannerProviderComingSoon}
                           onClick={() => {
                             void refreshPlannerSignal();
                           }}
                         >
-                          {plannerStatus === "loading" ? "Refreshing..." : "Refresh Planner Signal"}
+                          {plannerStatus === "loading"
+                            ? "Refreshing..."
+                            : isPlannerProviderComingSoon
+                              ? "Provider coming soon"
+                              : "Refresh Planner Signal"}
                         </button>
                       </div>
                     ) : null}
@@ -3844,12 +4518,20 @@ export default function HomePage() {
             </header>
 
             {checkFeedback ? <p className="technicalNote checkFeedback">{checkFeedback}</p> : null}
+            {coreStateError ? <p className="errorText">{coreStateError}</p> : null}
 
-            {violationStreak > 0 && snapshot.intervention !== "CONTINUE" ? (
+            {dominantLifecycleState && dominantLifecycleState.stateCode !== "informational" ? (
               <div className={`alertBanner ${snapshot.stability}`}>
-                <strong>⚠ {activeRegime.toUpperCase()} REGIME INSTABILITY</strong>
+                <strong>⚠ {lifecycleStateLabel(dominantLifecycleState.stateCode)}</strong>
                 <span>Plan: {planIdentifier || "UNASSIGNED"}</span>
                 <span>Boundary: {alertBoundaryTimestamp}</span>
+                <span>{dominantLifecycleReason}</span>
+                {secondaryLifecycleStates.length > 0 ? (
+                  <span>
+                    Additional active states:{" "}
+                    {secondaryLifecycleStates.map((state) => lifecycleStateLabel(state.stateCode)).join(" · ")}
+                  </span>
+                ) : null}
               </div>
             ) : null}
 
@@ -3982,6 +4664,43 @@ export default function HomePage() {
                   </section>
                 ) : null}
 
+                {synchronizationRows.length > 0 ? (
+                  <section className="plannerSummaryPanel syncMatrixPanel">
+                    <h4>Synchronization Matrix</h4>
+                    <p className="technicalNote">
+                      Deterministic pairwise exposure only. No negotiation, no auto-reallocation.
+                    </p>
+                    <div className="syncTableWrap">
+                      <table className="syncTable">
+                        <thead>
+                          <tr>
+                            <th>Actor A</th>
+                            <th>Actor B</th>
+                            <th>Resource Pressure</th>
+                            <th>Timeline Gap</th>
+                            <th>Cross-Dep</th>
+                            <th>Mutual</th>
+                            <th>Budget Interdep.</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {synchronizationRows.map((row) => (
+                            <tr key={`${row.actorA}-${row.actorB}`}>
+                              <td>{row.actorA}</td>
+                              <td>{row.actorB}</td>
+                              <td>{formatSyncMetric(row.resourcePressure)}</td>
+                              <td>{formatSyncMetric(row.timelineGap)}</td>
+                              <td>{formatSyncMetric(row.crossDependencies)}</td>
+                              <td>{formatSyncMetric(row.mutualDependency)}</td>
+                              <td>{formatSyncMetric(row.budgetInterdependence)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </section>
+                ) : null}
+
                 <div className="signalRow">
                   <span className={`signalChip ${gpsStatus === "granted" ? "good" : "neutral"}`}>
                     GPS: {gpsStatusLabel(gpsStatus)}
@@ -4034,7 +4753,7 @@ export default function HomePage() {
                       </div>
                       <div>
                         <dt>Persistence duration</dt>
-                        <dd>{violationStreak} cycles</dd>
+                        <dd>{Math.max(0, Math.round(coreEvaluation?.payload.violation_duration_seconds ?? 0))} s</dd>
                       </div>
                       <div>
                         <dt>Threshold envelope</dt>
