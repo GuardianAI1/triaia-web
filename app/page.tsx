@@ -99,6 +99,7 @@ interface StoredPlan {
   id: string;
   planIdentifier: string;
   planDomain: string;
+  startingLocation: string;
   contractDocuments: ContractDocument[];
   invariants: InvariantField[];
   regime: Regime;
@@ -224,6 +225,50 @@ interface PlannerAdapter {
   fetchSignals(contractBoundaryStart: Date, contractBoundaryEnd: Date): Promise<PlannerSignal>;
 }
 
+interface DemoCoreOverrides {
+  contractId?: string;
+  regime?: Regime;
+  hardBoundaryMinutes?: number | null;
+  documents?: ContractDocument[];
+  invariants?: Record<string, boolean>;
+  etaMinutes?: number;
+  timeRemainingMinutes?: number;
+  environmentalLoad?: number;
+  plannerSignal?: PlannerSignal | null;
+}
+
+interface DemoScenarioStep {
+  id: string;
+  label: string;
+  detail: string;
+  etaMinutes: number;
+  timeRemainingMinutes: number;
+  environmentalLoad: number;
+  plannerSignal: PlannerSignal;
+  addDocuments?: ContractDocumentType[];
+  markInvariants?: string[];
+  relationRiskBuffer: "Low" | "Moderate" | "Elevated";
+  relationCriticalPath: "Active" | "Closed";
+  verifiedSignals: number;
+  totalSignals: number;
+}
+
+interface DemoLogEntry {
+  id: string;
+  label: string;
+  detail: string;
+  probability: number;
+  timestampIso: string;
+}
+
+interface DemoRelationState {
+  timeRemainingMinutes: number;
+  riskBuffer: "Low" | "Moderate" | "Elevated";
+  criticalPath: "Active" | "Closed";
+  externalSignalsVerified: number;
+  externalSignalsTotal: number;
+}
+
 interface DocumentSuggestion {
   docType: ContractDocumentType;
   title: string;
@@ -260,6 +305,198 @@ const PLANNER_SCOPE_HINTS: Record<PlannerProvider, string> = {
   notion: "Notion read-only adapter is coming soon in UI.",
   ical: "iCal local feed: no OAuth required"
 };
+const DEMO_STEP_DELAY_MS = 5500;
+const DEMO_TRAVEL_BOUNDARY = "2026-07-14T18:30";
+const DEMO_TRAVEL_PLAN_IDENTIFIER = "Arrive in San Francisco";
+const DEMO_TRAVEL_STARTING_LOCATION = "Paris";
+const DEMO_INVARIANT_LABELS: Record<string, string> = {
+  ticket_verified: "Ticket verified",
+  boundary_time_locked: "Boundary time locked",
+  departure_time_locked: "Departure time confirmed",
+  passport_or_id_verified: "Passport or ID verified",
+  gate_or_boarding_ready: "Gate or boarding readiness",
+  arrival_confirmed: "Arrival confirmed"
+};
+const DEMO_TRAVEL_STEPS: DemoScenarioStep[] = [
+  {
+    id: "contract_created",
+    label: "Contract created",
+    detail: "Goal: Arrive in San Francisco · Deadline: Jul 14, 18:30 · Starting location: Paris.",
+    etaMinutes: 1080,
+    timeRemainingMinutes: 1740,
+    environmentalLoad: 0.18,
+    plannerSignal: {
+      totalTasks: 7,
+      completedTasks: 0,
+      overdueTasks: 0,
+      dueNext24h: 2,
+      lastUpdated: 0
+    },
+    relationRiskBuffer: "Moderate",
+    relationCriticalPath: "Active",
+    verifiedSignals: 0,
+    totalSignals: 8
+  },
+  {
+    id: "ticket_uploaded",
+    label: "Flight ticket uploaded",
+    detail: "Flight itinerary linked to contract evidence.",
+    etaMinutes: 1030,
+    timeRemainingMinutes: 1700,
+    environmentalLoad: 0.16,
+    plannerSignal: {
+      totalTasks: 7,
+      completedTasks: 1,
+      overdueTasks: 0,
+      dueNext24h: 2,
+      lastUpdated: 0
+    },
+    addDocuments: ["flight_itinerary"],
+    markInvariants: ["ticket_verified", "boundary_time_locked"],
+    relationRiskBuffer: "Moderate",
+    relationCriticalPath: "Active",
+    verifiedSignals: 1,
+    totalSignals: 8
+  },
+  {
+    id: "hotel_booking_entered",
+    label: "Hotel booking entered",
+    detail: "Destination lodging dependency linked.",
+    etaMinutes: 990,
+    timeRemainingMinutes: 1660,
+    environmentalLoad: 0.15,
+    plannerSignal: {
+      totalTasks: 7,
+      completedTasks: 2,
+      overdueTasks: 0,
+      dueNext24h: 2,
+      lastUpdated: 0
+    },
+    addDocuments: ["hotel_booking", "event_ticket"],
+    relationRiskBuffer: "Moderate",
+    relationCriticalPath: "Active",
+    verifiedSignals: 2,
+    totalSignals: 8
+  },
+  {
+    id: "uber_requested",
+    label: "Uber requested",
+    detail: "Transport alignment signal turned on under live traffic.",
+    etaMinutes: 960,
+    timeRemainingMinutes: 1520,
+    environmentalLoad: 0.94,
+    plannerSignal: {
+      totalTasks: 7,
+      completedTasks: 2,
+      overdueTasks: 1,
+      dueNext24h: 3,
+      lastUpdated: 0
+    },
+    addDocuments: ["transport_booking"],
+    relationRiskBuffer: "Elevated",
+    relationCriticalPath: "Active",
+    verifiedSignals: 3,
+    totalSignals: 8
+  },
+  {
+    id: "uber_arrived",
+    label: "Uber arrived",
+    detail: "Route delay clears and alignment recovers.",
+    etaMinutes: 760,
+    timeRemainingMinutes: 1440,
+    environmentalLoad: 0.34,
+    plannerSignal: {
+      totalTasks: 7,
+      completedTasks: 3,
+      overdueTasks: 0,
+      dueNext24h: 2,
+      lastUpdated: 0
+    },
+    relationRiskBuffer: "Moderate",
+    relationCriticalPath: "Active",
+    verifiedSignals: 4,
+    totalSignals: 8
+  },
+  {
+    id: "gps_airport_confirmed",
+    label: "GPS confirms airport",
+    detail: "Geospatial coupling verifies airport alignment.",
+    etaMinutes: 420,
+    timeRemainingMinutes: 920,
+    environmentalLoad: 0.21,
+    plannerSignal: {
+      totalTasks: 7,
+      completedTasks: 4,
+      overdueTasks: 0,
+      dueNext24h: 1,
+      lastUpdated: 0
+    },
+    relationRiskBuffer: "Moderate",
+    relationCriticalPath: "Active",
+    verifiedSignals: 5,
+    totalSignals: 8
+  },
+  {
+    id: "qr_scan_passed",
+    label: "QR scan passed",
+    detail: "Boarding-pass boundary verification completed.",
+    etaMinutes: 260,
+    timeRemainingMinutes: 520,
+    environmentalLoad: 0.17,
+    plannerSignal: {
+      totalTasks: 7,
+      completedTasks: 5,
+      overdueTasks: 0,
+      dueNext24h: 1,
+      lastUpdated: 0
+    },
+    addDocuments: ["boarding_pass"],
+    markInvariants: ["departure_time_locked", "gate_or_boarding_ready"],
+    relationRiskBuffer: "Low",
+    relationCriticalPath: "Active",
+    verifiedSignals: 6,
+    totalSignals: 8
+  },
+  {
+    id: "boarding_complete",
+    label: "Boarding complete",
+    detail: "Critical path converges with boundary integrity.",
+    etaMinutes: 140,
+    timeRemainingMinutes: 260,
+    environmentalLoad: 0.11,
+    plannerSignal: {
+      totalTasks: 7,
+      completedTasks: 6,
+      overdueTasks: 0,
+      dueNext24h: 0,
+      lastUpdated: 0
+    },
+    relationRiskBuffer: "Low",
+    relationCriticalPath: "Active",
+    verifiedSignals: 7,
+    totalSignals: 8
+  },
+  {
+    id: "landed",
+    label: "Landed",
+    detail: "Boundary reached and arrival signal confirmed.",
+    etaMinutes: 20,
+    timeRemainingMinutes: 60,
+    environmentalLoad: 0.05,
+    plannerSignal: {
+      totalTasks: 7,
+      completedTasks: 7,
+      overdueTasks: 0,
+      dueNext24h: 0,
+      lastUpdated: 0
+    },
+    markInvariants: ["arrival_confirmed"],
+    relationRiskBuffer: "Low",
+    relationCriticalPath: "Closed",
+    verifiedSignals: 8,
+    totalSignals: 8
+  }
+];
 
 const CORE_REASON_COPY: Record<string, string> = {
   CONTRACT_INTEGRITY_FAILURE: "Boundary integrity failed.",
@@ -572,9 +809,6 @@ const PLAN_DOMAIN_OPTIONS: Array<{ value: string; label: string }> = [
   { value: "medical", label: "Medical" },
   { value: "travel", label: "Travel" },
   { value: "gaming", label: "Gaming" },
-  { value: "legal", label: "Legal" },
-  { value: "education", label: "Education" },
-  { value: "operations", label: "Operations" },
   { value: "other", label: "Other" }
 ];
 
@@ -768,6 +1002,12 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
+function waitMs(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, milliseconds);
+  });
+}
+
 function message(role: ChatRole, text: string): ChatMessage {
   return { id: uid(), role, text };
 }
@@ -875,11 +1115,12 @@ function classifyPlanDomain(rawText: string): DomainDetection {
 function buildPolicySourceText(
   planIdentifier: string,
   planDomain: string,
+  startingLocation: string,
   softObjective: string,
   resourceConstraint: string,
   contractDocumentText: string
 ): string {
-  return [planIdentifier, planDomain, softObjective, resourceConstraint, contractDocumentText]
+  return [planIdentifier, planDomain, startingLocation, softObjective, resourceConstraint, contractDocumentText]
     .filter((value) => value.trim().length > 0)
     .join(" ");
 }
@@ -2002,6 +2243,7 @@ function refreshSnapshotForPlan(
     | "resourceConstraint"
     | "planIdentifier"
     | "planDomain"
+    | "startingLocation"
     | "contractDocuments"
   >,
   nowMs: number
@@ -2009,6 +2251,7 @@ function refreshSnapshotForPlan(
   const contractText = buildPolicySourceText(
     plan.planIdentifier,
     plan.planDomain,
+    plan.startingLocation,
     plan.softObjective,
     plan.resourceConstraint,
     buildContractDocumentPolicyText(plan.contractDocuments)
@@ -2047,6 +2290,7 @@ function buildAssistantPrompt(params: {
   userInput: string;
   planIdentifier: string;
   planDomain: string;
+  startingLocation: string;
   regime: Regime;
   structuralMode: StructuralMode;
   snapshot: Snapshot;
@@ -2061,6 +2305,7 @@ function buildAssistantPrompt(params: {
     userInput,
     planIdentifier,
     planDomain,
+    startingLocation,
     regime,
     structuralMode,
     snapshot,
@@ -2076,6 +2321,7 @@ function buildAssistantPrompt(params: {
     `User request: ${userInput}`,
     `Plan: ${planIdentifier || "UNASSIGNED"}`,
     `Domain: ${planDomain || "UNSPECIFIED"}`,
+    `Starting location: ${startingLocation || "UNSPECIFIED"}`,
     `Regime: ${regime.toUpperCase()}`,
     `Mode: ${structuralMode.toUpperCase()}`,
     `Intervention state: ${snapshot.intervention}`,
@@ -2165,11 +2411,13 @@ export default function HomePage() {
   const [regime, setRegime] = useState<Regime | null>(null);
   const [planIdentifier, setPlanIdentifier] = useState("");
   const [planDomain, setPlanDomain] = useState("");
+  const [startingLocation, setStartingLocation] = useState("");
   const [contractDocuments, setContractDocuments] = useState<ContractDocument[]>([]);
   const [hardBoundary, setHardBoundary] = useState(defaultHardBoundary);
   const [softObjective, setSoftObjective] = useState("");
   const [resourceConstraint, setResourceConstraint] = useState("");
   const [structuralMode, setStructuralMode] = useState<StructuralMode>("automatic");
+  const [manualBoundaryHint, setManualBoundaryHint] = useState("");
 
   const [couplings, setCouplings] = useState<Record<CouplingKey, boolean>>(INITIAL_COUPLINGS);
 
@@ -2220,6 +2468,12 @@ export default function HomePage() {
   const [scanCandidate, setScanCandidate] = useState<BoardingPassExtraction | null>(null);
   const [lastScanApplied, setLastScanApplied] = useState<BoardingPassExtraction | null>(null);
   const [stabilityHistory, setStabilityHistory] = useState<number[]>([]);
+  const [demoModeActive, setDemoModeActive] = useState(false);
+  const [demoRunning, setDemoRunning] = useState(false);
+  const [demoStepIndex, setDemoStepIndex] = useState(-1);
+  const [demoRelation, setDemoRelation] = useState<DemoRelationState | null>(null);
+  const [demoLog, setDemoLog] = useState<DemoLogEntry[]>([]);
+  const [demoStatusText, setDemoStatusText] = useState("");
 
   const longPressTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
   const geoWatchId = useRef<number | null>(null);
@@ -2229,6 +2483,10 @@ export default function HomePage() {
   const scannerBusyRef = useRef(false);
   const consentCheckboxRef = useRef<HTMLInputElement | null>(null);
   const plannerLastKnownRef = useRef<PlannerSignal | null>(null);
+  const hardBoundaryInputRef = useRef<HTMLInputElement | null>(null);
+  const softBoundaryInputRef = useRef<HTMLInputElement | null>(null);
+  const resourceBoundaryInputRef = useRef<HTMLInputElement | null>(null);
+  const demoRunTokenRef = useRef(0);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNowMs(Date.now()), 30000);
@@ -2248,6 +2506,7 @@ export default function HomePage() {
           return {
             ...candidate,
             planDomain: candidate.planDomain ?? "",
+            startingLocation: candidate.startingLocation ?? "",
             couplings: {
               ...INITIAL_COUPLINGS,
               ...(candidate.couplings ?? {})
@@ -2642,6 +2901,16 @@ export default function HomePage() {
     };
   }, [consentAccepted, couplings.planner, refreshPlannerSignal]);
 
+  useEffect(() => {
+    setManualBoundaryHint("");
+  }, [regime]);
+
+  useEffect(() => {
+    return () => {
+      demoRunTokenRef.current += 1;
+    };
+  }, []);
+
   const couplingCount = useMemo(() => countCouplings(couplings), [couplings]);
   const activeRegime = regime ?? "hard";
   const isActiveDashboard = screen === "dashboard" && Boolean(currentPlanId);
@@ -2650,13 +2919,31 @@ export default function HomePage() {
     [contractDocuments]
   );
   const policySourceText = useMemo(
-    () => buildPolicySourceText(planIdentifier, planDomain, softObjective, resourceConstraint, contractDocumentPolicyText),
-    [planIdentifier, planDomain, softObjective, resourceConstraint, contractDocumentPolicyText]
+    () =>
+      buildPolicySourceText(
+        planIdentifier,
+        planDomain,
+        startingLocation,
+        softObjective,
+        resourceConstraint,
+        contractDocumentPolicyText
+      ),
+    [planIdentifier, planDomain, startingLocation, softObjective, resourceConstraint, contractDocumentPolicyText]
   );
   const domainDetection = useMemo(() => classifyPlanDomain(policySourceText), [policySourceText]);
   const isBlockedPlan = Boolean(domainDetection.blockedRule);
   const flightContextDetected = useMemo(() => isLikelyFlightContext(policySourceText), [policySourceText]);
+  const requiresStartingLocation = planDomain === "travel" || flightContextDetected;
   const canScanBoardingPass = activeRegime === "hard" && flightContextDetected;
+  const boundaryExampleText = useMemo(() => {
+    if (activeRegime === "hard") {
+      return "Example: Flight departure on July 14 at 18:30.";
+    }
+    if (activeRegime === "soft") {
+      return "Example: \"Conference deck approved by legal review.\"";
+    }
+    return "Example: \"Budget ceiling: $20,000 for this contract window.\"";
+  }, [activeRegime]);
   const suggestedDocuments = useMemo(
     () =>
       inferContractDocumentSuggestions({
@@ -2870,6 +3157,28 @@ export default function HomePage() {
       }
     ];
 
+    if (demoModeActive) {
+      const hierarchy = [
+        { id: "demo-book", label: "Book flight", completedAtStep: 1 },
+        { id: "demo-airport", label: "Travel to airport", completedAtStep: 5 },
+        { id: "demo-security", label: "Pass security", completedAtStep: 6 },
+        { id: "demo-board", label: "Board flight", completedAtStep: 7 },
+        { id: "demo-arrive", label: "Arrive at SFO", completedAtStep: 8 }
+      ] as const;
+
+      for (const item of hierarchy) {
+        const completed = demoStepIndex >= item.completedAtStep;
+        const active = demoStepIndex === item.completedAtStep - 1;
+        nodes.push({
+          id: item.id,
+          label: item.label,
+          stability: completed ? "stable" : active ? "strained" : "critical",
+          capacity: completed ? "Completed" : active ? "In progress" : "Pending",
+          margin: completed ? "Closed" : "Open"
+        });
+      }
+    }
+
     for (const invariant of invariantFields) {
       nodes.push({
         id: `invariant-${invariant.key}`,
@@ -2892,7 +3201,7 @@ export default function HomePage() {
     }
 
     return nodes;
-  }, [planIdentifier, snapshot, couplingCount, invariantFields, coreValidation]);
+  }, [planIdentifier, snapshot, couplingCount, demoModeActive, demoStepIndex, invariantFields, coreValidation]);
 
   const hardBoundaryMinutes = useMemo(() => {
     const parsed = parseDeadline(hardBoundary);
@@ -2906,6 +3215,12 @@ export default function HomePage() {
     () => formatBoundaryTimestamp(activeRegime, hardBoundary),
     [activeRegime, hardBoundary]
   );
+  const demoProgressPercent = useMemo(() => {
+    if (demoStepIndex < 0) {
+      return 0;
+    }
+    return clamp(((demoStepIndex + 1) / DEMO_TRAVEL_STEPS.length) * 100, 0, 100);
+  }, [demoStepIndex]);
 
   const coreStateCriteria = useMemo(() => {
     if (!coreEvaluation) {
@@ -3028,36 +3343,42 @@ export default function HomePage() {
   }, [activeRegime, hardBoundaryMinutes]);
 
   const fetchCoreState = useCallback(
-    async (): Promise<EvaluateStructuralStateResponse | null> => {
-      if (!consentAccepted || !currentPlanId) {
+    async (overrides?: DemoCoreOverrides): Promise<EvaluateStructuralStateResponse | null> => {
+      const activeContractId = overrides?.contractId ?? contractId;
+      if (!consentAccepted || !activeContractId) {
         return null;
       }
 
-      const plannerForCore: CorePlannerSignal | undefined = plannerSignal
+      const effectiveRegime = overrides?.regime ?? activeRegime;
+      const effectiveHardBoundaryMinutes = overrides?.hardBoundaryMinutes ?? hardBoundaryMinutes;
+      const effectiveDocuments = overrides?.documents ?? contractDocuments;
+      const effectiveInvariants = overrides?.invariants ?? invariantsMap;
+      const plannerSource = overrides?.plannerSignal ?? plannerSignal;
+      const plannerForCore: CorePlannerSignal | undefined = plannerSource
         ? {
-            totalTasks: plannerSignal.totalTasks,
-            completedTasks: plannerSignal.completedTasks,
-            overdueTasks: plannerSignal.overdueTasks,
-            dueNext24h: plannerSignal.dueNext24h,
-            lastUpdated: plannerSignal.lastUpdated
+            totalTasks: plannerSource.totalTasks,
+            completedTasks: plannerSource.completedTasks,
+            overdueTasks: plannerSource.overdueTasks,
+            dueNext24h: plannerSource.dueNext24h,
+            lastUpdated: plannerSource.lastUpdated
           }
         : undefined;
 
       const validatePayload = buildValidatePlanPayload({
-        regime: activeRegime,
-        hardBoundaryMinutes,
-        plannerSignal,
-        documents: contractDocuments
+        regime: effectiveRegime,
+        hardBoundaryMinutes: effectiveHardBoundaryMinutes,
+        plannerSignal: plannerSource ?? null,
+        documents: effectiveDocuments
       });
 
       const [evaluation, validation] = await Promise.all([
         requestStructuralState({
-          contract_id: contractId,
-          invariants: invariantsMap,
-          eta_minutes: etaMinutes,
-          time_remaining_minutes: timeRemainingMinutesForCore,
+          contract_id: activeContractId,
+          invariants: effectiveInvariants,
+          eta_minutes: overrides?.etaMinutes ?? etaMinutes,
+          time_remaining_minutes: overrides?.timeRemainingMinutes ?? timeRemainingMinutesForCore,
           planner_signal: plannerForCore,
-          environmental_load: environmentalLoad,
+          environmental_load: overrides?.environmentalLoad ?? environmentalLoad,
           threshold: 0.6,
           evaluation_interval_seconds: 1,
           alignment_lambda: 1.0
@@ -3092,12 +3413,11 @@ export default function HomePage() {
     },
     [
       consentAccepted,
-      currentPlanId,
+      contractId,
       plannerSignal,
       activeRegime,
       hardBoundaryMinutes,
       contractDocuments,
-      contractId,
       invariantsMap,
       etaMinutes,
       timeRemainingMinutesForCore,
@@ -3185,7 +3505,7 @@ export default function HomePage() {
   }, [contractDocuments, hardBoundary, invariantFields.length]);
 
   useEffect(() => {
-    if (!chatAvailable || !consentAccepted) {
+    if (!chatAvailable || !consentAccepted || demoRunning) {
       return;
     }
     void fetchCoreState();
@@ -3196,7 +3516,7 @@ export default function HomePage() {
     return () => {
       window.clearInterval(intervalId);
     };
-  }, [chatAvailable, consentAccepted, fetchCoreState]);
+  }, [chatAvailable, consentAccepted, demoRunning, fetchCoreState]);
 
   function clearLongPressTimer() {
     if (longPressTimeout.current) {
@@ -3211,6 +3531,304 @@ export default function HomePage() {
       setAdvancedVisible((previous) => !previous);
       longPressTimeout.current = null;
     }, 700);
+  }
+
+  function focusPrimaryBoundaryField() {
+    setFormError("");
+    if (activeRegime === "hard") {
+      hardBoundaryInputRef.current?.focus();
+      if (hardBoundaryInputRef.current && "showPicker" in hardBoundaryInputRef.current) {
+        const pickerInput = hardBoundaryInputRef.current as HTMLInputElement & { showPicker?: () => void };
+        pickerInput.showPicker?.();
+      }
+      setManualBoundaryHint("Enter the exact deadline date and time the plan must satisfy.");
+      return;
+    }
+    if (activeRegime === "soft") {
+      softBoundaryInputRef.current?.focus();
+      setManualBoundaryHint("Describe the main success condition in plain language.");
+      return;
+    }
+    resourceBoundaryInputRef.current?.focus();
+    setManualBoundaryHint("Define the main limited resource that constrains this contract.");
+  }
+
+  function stopTravelDemo(resetState: boolean) {
+    demoRunTokenRef.current += 1;
+    setDemoRunning(false);
+    if (resetState) {
+      setDemoModeActive(false);
+      setDemoStepIndex(-1);
+      setDemoRelation(null);
+      setDemoLog([]);
+      setDemoStatusText("");
+    }
+  }
+
+  function loadTravelDemoPreset(keepCurrentScreen = true) {
+    setRegime("hard");
+    setPlanIdentifier(DEMO_TRAVEL_PLAN_IDENTIFIER);
+    setPlanDomain("travel");
+    setStartingLocation(DEMO_TRAVEL_STARTING_LOCATION);
+    setHardBoundary(DEMO_TRAVEL_BOUNDARY);
+    setSoftObjective("");
+    setResourceConstraint("Arrival boundary at SFO before convention window.");
+    setStructuralMode("automatic");
+    setCouplings((previous) => ({
+      ...previous,
+      geospatial: true,
+      weather: true,
+      planner: true
+    }));
+    setManualBoundaryHint("Travel demo preset loaded. Adjust fields if needed, then continue.");
+    setFormError("");
+    if (!keepCurrentScreen) {
+      setScreen("configuration");
+    }
+  }
+
+  function addDemoDocuments(docTypes: ContractDocumentType[]) {
+    if (docTypes.length === 0) {
+      return;
+    }
+
+    setContractDocuments((previous) => {
+      const next = [...previous];
+      for (const docType of docTypes) {
+        if (next.some((item) => item.docType === docType)) {
+          continue;
+        }
+        next.push({
+          id: uid(),
+          docType,
+          title: contractDocumentTypeLabel(docType),
+          sourceLink: "",
+          referenceCode: "",
+          notes: "Added by deterministic demo scenario."
+        });
+      }
+      return next;
+    });
+  }
+
+  function markDemoInvariants(invariantKeys: string[]) {
+    if (invariantKeys.length === 0) {
+      return;
+    }
+
+    setInvariantFields((previous) => {
+      const byKey = new Map(previous.map((item) => [item.key, item]));
+      for (const key of invariantKeys) {
+        const existing = byKey.get(key);
+        if (existing) {
+          byKey.set(key, { ...existing, verified: true });
+        } else {
+          byKey.set(key, {
+            key,
+            label: DEMO_INVARIANT_LABELS[key] ?? key.replace(/_/g, " "),
+            critical: true,
+            verified: true
+          });
+        }
+      }
+      return Array.from(byKey.values());
+    });
+  }
+
+  async function runTravelDemo() {
+    if (!chatAvailable || !currentPlanId) {
+      setCheckFeedback("Activate a contract before running demo mode.");
+      return;
+    }
+
+    const runToken = Date.now();
+    demoRunTokenRef.current = runToken;
+    setDemoModeActive(true);
+    setDemoRunning(true);
+    setDemoStepIndex(-1);
+    setDemoRelation(null);
+    setDemoLog([]);
+    setDemoStatusText("Initializing deterministic travel demo...");
+    setCheckFeedback("Demo mode running. Manual editing is temporarily locked.");
+    setShowInterventionModal(false);
+    setCoreStateError("");
+
+    loadTravelDemoPreset(true);
+    setContractDocuments([]);
+    setLastScanApplied(null);
+    setPlannerWarning("");
+    setPlannerStatus("ready");
+    setPlannerSignalWeight(1);
+    setStabilityHistory([]);
+
+    const demoDocuments: ContractDocument[] = [];
+    const demoInvariantMap = new Map<string, InvariantField>();
+    for (const [key, label] of Object.entries(DEMO_INVARIANT_LABELS)) {
+      demoInvariantMap.set(key, {
+        key,
+        label,
+        critical: true,
+        verified: false
+      });
+    }
+    setInvariantFields(Array.from(demoInvariantMap.values()));
+
+    await waitMs(120);
+
+    for (let index = 0; index < DEMO_TRAVEL_STEPS.length; index += 1) {
+      if (demoRunTokenRef.current !== runToken) {
+        return;
+      }
+
+      const step = DEMO_TRAVEL_STEPS[index];
+      const stepPlannerSignal: PlannerSignal = {
+        ...step.plannerSignal,
+        lastUpdated: Date.now()
+      };
+
+      setDemoStepIndex(index);
+      setDemoStatusText(`Step ${index + 1}/${DEMO_TRAVEL_STEPS.length}: ${step.label}`);
+      setPlannerSignal(stepPlannerSignal);
+      plannerLastKnownRef.current = stepPlannerSignal;
+      setPlannerStatus("ready");
+      setPlannerSignalWeight(1);
+
+      if (step.addDocuments) {
+        for (const docType of step.addDocuments) {
+          if (demoDocuments.some((item) => item.docType === docType)) {
+            continue;
+          }
+          demoDocuments.push({
+            id: uid(),
+            docType,
+            title: contractDocumentTypeLabel(docType),
+            sourceLink: "",
+            referenceCode: "",
+            notes: "Added by deterministic demo scenario."
+          });
+        }
+        addDemoDocuments(step.addDocuments);
+      }
+      if (step.markInvariants) {
+        for (const key of step.markInvariants) {
+          const existing = demoInvariantMap.get(key);
+          if (existing) {
+            demoInvariantMap.set(key, { ...existing, verified: true });
+          } else {
+            demoInvariantMap.set(key, {
+              key,
+              label: DEMO_INVARIANT_LABELS[key] ?? key.replace(/_/g, " "),
+              critical: true,
+              verified: true
+            });
+          }
+        }
+        markDemoInvariants(step.markInvariants);
+      }
+
+      if (step.id === "uber_requested") {
+        setGpsStatus("requesting");
+        setGeoSignal(null);
+      } else if (step.id === "uber_arrived") {
+        setGpsStatus("granted");
+        setGeoSignal({
+          latitude: 48.8738,
+          longitude: 2.295,
+          accuracyMeters: 12,
+          speedKmh: 27,
+          movement: "moving",
+          updatedAtIso: nowIso()
+        });
+      } else if (step.id === "gps_airport_confirmed") {
+        setGpsStatus("granted");
+        setGeoSignal({
+          latitude: 49.0097,
+          longitude: 2.5479,
+          accuracyMeters: 9,
+          speedKmh: 4,
+          movement: "stationary",
+          updatedAtIso: nowIso()
+        });
+        setWeatherStatus("ready");
+        setWeatherSignal({
+          temperatureC: 17,
+          windKph: 14,
+          precipitationMm: 0.2,
+          weatherCode: 2,
+          risk: "low",
+          summary: "Low weather load",
+          updatedAtIso: nowIso()
+        });
+      } else if (step.id === "landed") {
+        setGeoSignal({
+          latitude: 37.6213,
+          longitude: -122.379,
+          accuracyMeters: 16,
+          speedKmh: 0,
+          movement: "stationary",
+          updatedAtIso: nowIso()
+        });
+        setWeatherStatus("ready");
+        setWeatherSignal({
+          temperatureC: 16,
+          windKph: 12,
+          precipitationMm: 0,
+          weatherCode: 1,
+          risk: "low",
+          summary: "Low weather load",
+          updatedAtIso: nowIso()
+        });
+      }
+
+      const evaluation = await fetchCoreState({
+        contractId: currentPlanId,
+        regime: "hard",
+        hardBoundaryMinutes: step.timeRemainingMinutes,
+        documents: demoDocuments,
+        invariants: Object.fromEntries(
+          Array.from(demoInvariantMap.values()).map((item) => [item.key, item.verified])
+        ),
+        etaMinutes: step.etaMinutes,
+        timeRemainingMinutes: step.timeRemainingMinutes,
+        environmentalLoad: step.environmentalLoad,
+        plannerSignal: stepPlannerSignal
+      });
+
+      if (demoRunTokenRef.current !== runToken) {
+        return;
+      }
+
+      const probability = evaluation ? Math.round(evaluation.stability_index * 100) : 0;
+      setDemoRelation({
+        timeRemainingMinutes: step.timeRemainingMinutes,
+        riskBuffer: step.relationRiskBuffer,
+        criticalPath: step.relationCriticalPath,
+        externalSignalsVerified: step.verifiedSignals,
+        externalSignalsTotal: step.totalSignals
+      });
+      setDemoLog((previous) =>
+        [
+          ...previous,
+          {
+            id: step.id,
+            label: step.label,
+            detail: step.detail,
+            probability,
+            timestampIso: nowIso()
+          }
+        ].slice(-18)
+      );
+
+      if (index < DEMO_TRAVEL_STEPS.length - 1) {
+        await waitMs(DEMO_STEP_DELAY_MS);
+      }
+    }
+
+    if (demoRunTokenRef.current === runToken) {
+      setDemoRunning(false);
+      setDemoStatusText("Demo complete. Trajectory reached boundary.");
+      setCheckFeedback("Demo complete. Core remained source of truth for each transition.");
+    }
   }
 
   function openBoundaryScanner() {
@@ -3264,6 +3882,14 @@ export default function HomePage() {
 
     if (!planIdentifier.trim() && scanCandidate.flightNumber) {
       setPlanIdentifier(`Flight ${scanCandidate.flightNumber}`);
+    }
+
+    if (!planDomain.trim()) {
+      setPlanDomain("travel");
+    }
+
+    if (!startingLocation.trim() && scanCandidate.departureAirport) {
+      setStartingLocation(scanCandidate.departureAirport);
     }
 
     if (!resourceConstraint.trim() && scanCandidate.departureAirport && scanCandidate.arrivalAirport) {
@@ -3361,6 +3987,7 @@ export default function HomePage() {
       id: planId,
       planIdentifier: planIdentifier.trim() || "UNASSIGNED",
       planDomain: planDomain.trim(),
+      startingLocation: startingLocation.trim(),
       contractDocuments: contractDocuments.map((document) => ({ ...document })),
       invariants: invariantFields.map((invariant) => ({ ...invariant })),
       regime: activeRegime,
@@ -3383,10 +4010,12 @@ export default function HomePage() {
   }
 
   function loadPlan(record: StoredPlan, destination: Screen) {
+    stopTravelDemo(true);
     setCurrentPlanId(record.id);
     setRegime(record.regime);
     setPlanIdentifier(record.planIdentifier);
     setPlanDomain(record.planDomain ?? "");
+    setStartingLocation(record.startingLocation ?? "");
     setContractDocuments(Array.isArray(record.contractDocuments) ? record.contractDocuments : []);
     setInvariantFields(Array.isArray(record.invariants) ? record.invariants : []);
     setHardBoundary(record.hardBoundary);
@@ -3409,6 +4038,7 @@ export default function HomePage() {
   }
 
   function finalizeActivation(planToActivate: StoredPlan, pauseCurrent: boolean) {
+    stopTravelDemo(true);
     setPlans((previous) => {
       let next = [...previous];
 
@@ -3502,6 +4132,11 @@ export default function HomePage() {
       return;
     }
 
+    if (requiresStartingLocation && !startingLocation.trim()) {
+      setFormError("Starting location is required for travel and flight contexts.");
+      return;
+    }
+
     if (isBlockedPlan && domainDetection.blockedRule) {
       setFormError(
         `Plan blocked by policy screening (${domainDetection.blockedRule.label}). Revise the contract text and try again.`
@@ -3524,6 +4159,12 @@ export default function HomePage() {
       setFormError(
         `Plan blocked by policy screening (${domainDetection.blockedRule.label}). Revise the contract text and try again.`
       );
+      return;
+    }
+
+    if (requiresStartingLocation && !startingLocation.trim()) {
+      setScreen("configuration");
+      setFormError("Starting location is required for travel and flight contexts.");
       return;
     }
 
@@ -3558,6 +4199,7 @@ export default function HomePage() {
           ...plan,
           planIdentifier: planIdentifier.trim() || "UNASSIGNED",
           planDomain: planDomain.trim(),
+          startingLocation: startingLocation.trim(),
           contractDocuments: contractDocuments.map((document) => ({ ...document })),
           invariants: invariantFields.map((invariant) => ({ ...invariant })),
           regime: activeRegime,
@@ -3629,6 +4271,7 @@ export default function HomePage() {
       buildPolicySourceText(
         plan.planIdentifier,
         plan.planDomain ?? "",
+        plan.startingLocation ?? "",
         plan.softObjective,
         plan.resourceConstraint,
         buildContractDocumentPolicyText(plan.contractDocuments ?? [])
@@ -3713,15 +4356,18 @@ export default function HomePage() {
   }
 
   function resetNode() {
+    stopTravelDemo(true);
     stopBoundaryScannerSession();
     setScreen("activation");
     setRegime(null);
     setPlanIdentifier("");
     setPlanDomain("");
+    setStartingLocation("");
     setContractDocuments([]);
     setHardBoundary(defaultHardBoundary());
     setSoftObjective("");
     setResourceConstraint("");
+    setManualBoundaryHint("");
     setStructuralMode("automatic");
     setCouplings(INITIAL_COUPLINGS);
     setPlannerStatus("inactive");
@@ -3782,6 +4428,7 @@ export default function HomePage() {
         userInput: trimmed,
         planIdentifier,
         planDomain,
+        startingLocation,
         regime: activeRegime,
         structuralMode,
         snapshot,
@@ -3869,10 +4516,20 @@ export default function HomePage() {
           </div>
 
           <div className="topActions">
-            <button type="button" className="secondaryAction" onClick={() => setShowPlans(true)}>
+            <button
+              type="button"
+              className="secondaryAction"
+              onClick={() => setShowPlans(true)}
+              disabled={demoRunning}
+            >
               My Plans
             </button>
-            <button type="button" className="secondaryAction" onClick={() => setShowInfo(true)}>
+            <button
+              type="button"
+              className="secondaryAction"
+              onClick={() => setShowInfo(true)}
+              disabled={demoRunning}
+            >
               Info
             </button>
             <a href="mailto:contact@triaia.com" className="contactAction">
@@ -3980,7 +4637,7 @@ export default function HomePage() {
                   />
                 </label>
                 <label>
-                  Domain (if applicable)
+                  Domain category (optional)
                   <select
                     value={planDomain}
                     onChange={(event) => setPlanDomain(event.target.value)}
@@ -3992,6 +4649,18 @@ export default function HomePage() {
                     ))}
                   </select>
                 </label>
+                <label>
+                  Starting location {requiresStartingLocation ? "(required for travel/flight)" : "(optional)"}
+                  <input
+                    type="text"
+                    value={startingLocation}
+                    onChange={(event) => setStartingLocation(event.target.value)}
+                    placeholder="Example: Paris"
+                  />
+                </label>
+                <p className="technicalNote">
+                  For travel plans, this is where the trajectory starts (city, airport, or region).
+                </p>
                 <p className="technicalNote domainPolicyNote">
                   Policy screening is active and enforced automatically. Detection is local and keyword-based; Triaia does
                   not inspect physical shipment contents or external world state by itself.
@@ -3999,10 +4668,14 @@ export default function HomePage() {
               </section>
 
               <section className="subPanel">
-                <h3>Primary Boundary</h3>
+                <h3>Deadline / Main Constraint</h3>
+                <p className="technicalNote">
+                  Define the one condition that determines plan success. HARD uses exact date/time, SOFT uses objective
+                  condition, RESOURCE uses limiting resource.
+                </p>
                 <div className="boundaryImportRow">
-                  <button type="button" className="secondaryAction" onClick={() => setFormError("")}>
-                    Enter Manually
+                  <button type="button" className="secondaryAction" onClick={focusPrimaryBoundaryField}>
+                    Use Manual Entry
                   </button>
                   {canScanBoardingPass ? (
                     <button type="button" className="primaryAction" onClick={openBoundaryScanner}>
@@ -4010,6 +4683,8 @@ export default function HomePage() {
                     </button>
                   ) : null}
                 </div>
+                <p className="technicalNote boundaryNote">{boundaryExampleText}</p>
+                {manualBoundaryHint ? <p className="technicalNote boundaryNote">{manualBoundaryHint}</p> : null}
                 {canScanBoardingPass ? (
                   <p className="technicalNote boundaryNote">Extracts departure fields locally. No image stored.</p>
                 ) : null}
@@ -4032,8 +4707,9 @@ export default function HomePage() {
 
                 {regime === "hard" ? (
                   <label>
-                    Date / Time selector
+                    Deadline date and time
                     <input
+                      ref={hardBoundaryInputRef}
                       type="datetime-local"
                       value={hardBoundary}
                       onChange={(event) => setHardBoundary(event.target.value)}
@@ -4043,24 +4719,26 @@ export default function HomePage() {
 
                 {regime === "soft" ? (
                   <label>
-                    Target objective descriptor
+                    Success condition
                     <input
+                      ref={softBoundaryInputRef}
                       type="text"
                       value={softObjective}
                       onChange={(event) => setSoftObjective(event.target.value)}
-                      placeholder="Deliver module readiness"
+                      placeholder='Example: "Conference deck approved by legal review"'
                     />
                   </label>
                 ) : null}
 
                 {regime === "resource" ? (
                   <label>
-                    Primary resource constraint field
+                    Main resource limit
                     <input
+                      ref={resourceBoundaryInputRef}
                       type="text"
                       value={resourceConstraint}
                       onChange={(event) => setResourceConstraint(event.target.value)}
-                      placeholder="Fuel margin threshold"
+                      placeholder='Example: "Fuel margin cannot drop below 20%"'
                     />
                   </label>
                 ) : null}
@@ -4293,6 +4971,9 @@ export default function HomePage() {
               <button type="button" className="secondaryAction" onClick={() => setScreen("regime")}>
                 Back
               </button>
+              <button type="button" className="secondaryAction" onClick={() => loadTravelDemoPreset(true)}>
+                Load Travel Demo Preset
+              </button>
               <button type="button" className="primaryAction" onClick={goToCoupling}>
                 Continue
               </button>
@@ -4500,18 +5181,39 @@ export default function HomePage() {
                 <h2>MAIN EXECUTION DASHBOARD</h2>
                 <p>
                   Contract: <strong>{planIdentifier || "UNASSIGNED"}</strong> · Regime: <strong>{snapshot.regimeClassification}</strong>{" "}
-                  · Mode: <strong>{structuralMode.toUpperCase()}</strong>
+                  · From: <strong>{startingLocation || "Unspecified"}</strong> · Mode:{" "}
+                  <strong>{structuralMode.toUpperCase()}</strong>
                 </p>
               </div>
 
               <div className="actionRow compact">
-                <button type="button" className="primaryAction" onClick={runDeterministicCheck}>
+                <button type="button" className="primaryAction" onClick={runDeterministicCheck} disabled={demoRunning}>
                   Run Deterministic Check
                 </button>
-                <button type="button" className="secondaryAction" onClick={() => setScreen("coupling")}>
+                <button
+                  type="button"
+                  className={demoRunning ? "secondaryAction" : "primaryAction"}
+                  onClick={() => {
+                    if (demoRunning) {
+                      stopTravelDemo(false);
+                      setDemoStatusText("Demo manually stopped.");
+                      setCheckFeedback("Demo mode stopped. Manual editing is enabled.");
+                      return;
+                    }
+                    void runTravelDemo();
+                  }}
+                >
+                  {demoRunning ? "Stop Demo" : "Run Travel Demo"}
+                </button>
+                <button
+                  type="button"
+                  className="secondaryAction"
+                  onClick={() => setScreen("coupling")}
+                  disabled={demoRunning}
+                >
                   Edit Coupling
                 </button>
-                <button type="button" className="secondaryAction" onClick={resetNode}>
+                <button type="button" className="secondaryAction" onClick={resetNode} disabled={demoRunning}>
                   Reset Node
                 </button>
               </div>
@@ -4721,6 +5423,74 @@ export default function HomePage() {
                   ) : null}
                 </div>
 
+                <section className="demoPanel">
+                  <div className="demoPanelHead">
+                    <h4>Demo Mode · Travel Scenario</h4>
+                    <span className={`signalChip ${demoRunning ? "good" : demoModeActive ? "neutral" : "neutral"}`}>
+                      {demoRunning ? "Running" : demoModeActive ? "Ready" : "Idle"}
+                    </span>
+                  </div>
+                  <p className="technicalNote">
+                    Deterministic scenario for explanation demos. While running, manual edits are locked and each step
+                    calls core for recalculation.
+                  </p>
+                  {demoStatusText ? <p className="technicalNote">{demoStatusText}</p> : null}
+
+                  <div className="demoProgressTrack" aria-hidden="true">
+                    <div className="demoProgressFill" style={{ width: `${demoProgressPercent}%` }} />
+                  </div>
+
+                  <ol className="demoStepList">
+                    {DEMO_TRAVEL_STEPS.map((step, index) => (
+                      <li
+                        key={step.id}
+                        className={`demoStepItem ${
+                          index < demoStepIndex ? "completed" : index === demoStepIndex ? "active" : ""
+                        }`}
+                      >
+                        <strong>{step.label}</strong>
+                        <span>{step.detail}</span>
+                      </li>
+                    ))}
+                  </ol>
+
+                  {demoRelation ? (
+                    <dl className="demoRelationGrid">
+                      <div>
+                        <dt>Time remaining</dt>
+                        <dd>{formatCountdown(demoRelation.timeRemainingMinutes)}</dd>
+                      </div>
+                      <div>
+                        <dt>Risk buffer</dt>
+                        <dd>{demoRelation.riskBuffer}</dd>
+                      </div>
+                      <div>
+                        <dt>Critical path</dt>
+                        <dd>{demoRelation.criticalPath}</dd>
+                      </div>
+                      <div>
+                        <dt>External signals verified</dt>
+                        <dd>
+                          {demoRelation.externalSignalsVerified}/{demoRelation.externalSignalsTotal}
+                        </dd>
+                      </div>
+                    </dl>
+                  ) : null}
+
+                  {demoLog.length > 0 ? (
+                    <ul className="demoLogList">
+                      {demoLog.slice(-5).map((entry) => (
+                        <li key={`${entry.id}-${entry.timestampIso}`}>
+                          <strong>{entry.label}</strong>
+                          <span>
+                            Probability: {entry.probability}% · {new Date(entry.timestampIso).toLocaleTimeString()}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
+                </section>
+
                 <div
                   className={`stabilityBar ${snapshot.stability}`}
                   onPointerDown={handleStabilityBarPointerDown}
@@ -4827,12 +5597,12 @@ export default function HomePage() {
                       value={assistantInput}
                       onChange={(event) => setAssistantInput(event.target.value)}
                       placeholder="Ask for deterministic state explanation"
-                      disabled={!chatAvailable || assistantBusy}
+                      disabled={!chatAvailable || assistantBusy || demoRunning}
                     />
                     <button
                       type="submit"
                       className="secondaryAction"
-                      disabled={!chatAvailable || assistantBusy || !assistantInput.trim()}
+                      disabled={!chatAvailable || assistantBusy || !assistantInput.trim() || demoRunning}
                     >
                       {assistantBusy ? "Asking..." : "Ask Voice Layer"}
                     </button>
@@ -4871,6 +5641,7 @@ export default function HomePage() {
                     <div>
                       <strong>{activePlan.planIdentifier}</strong>
                       <p>Domain: {activePlan.planDomain || "Unspecified"}</p>
+                      <p>Starting location: {activePlan.startingLocation || "Unspecified"}</p>
                       <p>Regime: {activePlan.regime.toUpperCase()}</p>
                       <p>Stability: {activePlan.lastSnapshot.stability.toUpperCase()}</p>
                       <p>Boundary: {describeBoundary(activePlan)}</p>
@@ -4900,6 +5671,7 @@ export default function HomePage() {
                         <div>
                           <strong>{plan.planIdentifier}</strong>
                           <p>Domain: {plan.planDomain || "Unspecified"}</p>
+                          <p>Starting location: {plan.startingLocation || "Unspecified"}</p>
                           <p>Regime: {plan.regime.toUpperCase()}</p>
                           <p>Status: {plan.status.toUpperCase()}</p>
                           <p>

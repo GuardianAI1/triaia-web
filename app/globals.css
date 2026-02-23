@@ -994,6 +994,129 @@ button:disabled {
   flex-wrap: wrap;
 }
 
+.demoPanel {
+  border: 1px solid #365974;
+  border-radius: 10px;
+  background: rgba(10, 19, 29, 0.82);
+  padding: 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.demoPanelHead {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.demoPanelHead h4 {
+  margin: 0;
+  font-size: 0.95rem;
+  letter-spacing: 0.04em;
+}
+
+.demoProgressTrack {
+  height: 9px;
+  border-radius: 999px;
+  border: 1px solid #3f5f79;
+  background: rgba(21, 38, 55, 0.9);
+  overflow: hidden;
+}
+
+.demoProgressFill {
+  height: 100%;
+  width: 0;
+  background: linear-gradient(90deg, rgba(25, 184, 207, 0.92), rgba(75, 227, 166, 0.95));
+  transition: width 360ms ease;
+}
+
+.demoStepList {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 6px;
+}
+
+.demoStepItem {
+  color: #9eb9cf;
+  display: grid;
+  gap: 2px;
+}
+
+.demoStepItem strong {
+  color: #cde1f2;
+  font-size: 0.89rem;
+}
+
+.demoStepItem span {
+  font-size: 0.82rem;
+  line-height: 1.35;
+}
+
+.demoStepItem.active strong {
+  color: #8ed9e6;
+}
+
+.demoStepItem.completed strong {
+  color: #b6f2d7;
+}
+
+.demoRelationGrid {
+  margin: 0;
+  display: grid;
+  gap: 7px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.demoRelationGrid div {
+  border: 1px solid #365874;
+  border-radius: 10px;
+  background: rgba(8, 16, 25, 0.84);
+  padding: 8px;
+}
+
+.demoRelationGrid dt {
+  font-size: 0.74rem;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: #8eb0c8;
+}
+
+.demoRelationGrid dd {
+  margin: 5px 0 0;
+  font-weight: 650;
+  color: #ddedfa;
+}
+
+.demoLogList {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 6px;
+}
+
+.demoLogList li {
+  border: 1px solid #365773;
+  border-radius: 9px;
+  background: rgba(8, 16, 24, 0.84);
+  padding: 7px 8px;
+  display: grid;
+  gap: 3px;
+}
+
+.demoLogList strong {
+  font-size: 0.88rem;
+  color: #d8eaf8;
+}
+
+.demoLogList span {
+  font-size: 0.81rem;
+  color: #a9c6dc;
+}
+
 .signalChip {
   border-radius: 999px;
   border: 1px solid #446380;
@@ -1369,7 +1492,8 @@ select:focus {
   }
 
   .snapshotGrid,
-  .advancedGrid {
+  .advancedGrid,
+  .demoRelationGrid {
     grid-template-columns: 1fr;
   }
 
